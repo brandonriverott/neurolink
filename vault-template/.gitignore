@@ -1,0 +1,5 @@
+# Obsidian window state changes all the time; keep it out of history
+.obsidian/workspace*.json
+.trash/
+.DS_Store
+_inbox/.steward-lock
