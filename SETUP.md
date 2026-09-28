@@ -1,6 +1,6 @@
 # SETUP — instructions for the AI
 
-You are setting up a second brain for the person you are talking to (called "the human" below). Work through the steps in order. This file is in the root of the Second Brain Kit. All kit paths below are relative to that root.
+You are setting up a second brain for the person you are talking to (called "the human" below). Work through the steps in order. This file is in the root of the Neurolink kit. All kit paths below are relative to that root.
 
 When you finish, the human will have:
 

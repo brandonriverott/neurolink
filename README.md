@@ -1,4 +1,4 @@
-# Second Brain Kit
+# Neurolink
 
 Give your AI a memory that lasts.
 
@@ -35,7 +35,7 @@ Your brain grows every time you use it. Nothing gets filed without a check.
 
 1. Download this kit. Click **Code → Download ZIP** and unzip it, or run:
    ```bash
-   git clone https://github.com/brandonriverott/second-brain-kit.git
+   git clone https://github.com/brandonriverott/neurolink.git
    ```
 2. Open your AI inside the kit folder.
 3. Tell it: **"Read SETUP.md and set up my second brain."**
