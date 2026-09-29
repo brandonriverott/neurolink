@@ -86,24 +86,31 @@ function json(res, obj, code = 200) {
 // Listen on this machine plus any extra addresses from config listenHosts (e.g. a Tailscale IP for a
 // second computer) — never on the open local network: /chat runs Claude (2026-09-23).
 const HOSTS = ['127.0.0.1', ...CONFIG.listenHosts];
-const SAME_ORIGINS = new Set(HOSTS.flatMap(h => [`http://${h}:${PORT}`]).concat(`http://localhost:${PORT}`));
+const SAME_HOSTS = new Set([...HOSTS, 'localhost'].map(h => `${h}:${PORT}`.toLowerCase()));
+const SAME_ORIGINS = new Set([...SAME_HOSTS].map(h => `http://${h}`));
 
 // A browser page from another site must not read vault text, run Claude, or trigger Jev here
 // (no CORS headers are sent, and cross-site browser requests are refused outright). The brain's
 // own pages are same-origin; hooks, a second computer and other scripts send neither header.
 // Link clicks to the brain page stay allowed: the linking page cannot read it.
+// The Host check stops DNS rebinding: a hostile domain re-pointed at this machine looks same-origin
+// to the browser, but its requests still carry that domain as Host.
 function foreign(req, page) {
   const o = req.headers.origin, site = req.headers['sec-fetch-site'];
-  return (o && !SAME_ORIGINS.has(o)) || (site && site !== 'same-origin' && site !== 'none' && !(page && req.headers['sec-fetch-mode'] === 'navigate'));
+  return !SAME_HOSTS.has((req.headers.host || '').toLowerCase()) || (o && !SAME_ORIGINS.has(o)) || (site && site !== 'same-origin' && site !== 'none' && !(page && req.headers['sec-fetch-mode'] === 'navigate'));
 }
 
 async function handle(req, res) {
+  // Every response: no framing (clickjacking), no MIME sniffing, no cross-site <script>/<img> reads.
+  res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   const u = new URL(req.url, `http://localhost:${PORT}`);
   if (foreign(req, u.pathname === '/' || u.pathname === '/brain.html')) return json(res, { error: 'forbidden origin' }, 403);
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   if (u.pathname === '/' || u.pathname === '/brain.html') return serveFile(res, 'brain.html');
-  if (u.pathname === '/vault-data.js') return serveFile(res, 'vault-data.js');
+  // vault-data.js is not served: plain-http addresses (e.g. Tailscale) send no Sec-Fetch-*, so another
+  // site's <script src> could read the whole graph. brain.html reads /graph live and tolerates its 404.
   if (u.pathname === '/graph') { try { return json(res, liveGraph()); } catch (e) { return json(res, { error: String(e) }, 500); } }
   if (u.pathname === '/health') return json(res, { ok: true, ...liveIndex.health(), model: MODEL, claude: CLAUDE_VIA_CLI });
   if (u.pathname === '/health/full') {
@@ -116,6 +123,12 @@ async function handle(req, res) {
   }
 
   if (u.pathname === '/search') {
+    // Paid Jev reranks only for callers on the 127.0.0.1 listener (local hooks). Browsers always
+    // send Sec-Fetch-* to 127.0.0.1, so foreign() already refuses other sites there; over plain-http
+    // listenHosts they send none, and another site's <img> would look like a script. The socket can't be faked.
+    // Checked before q so a refused request never reaches retrieval or Jev.
+    const rerank = (u.searchParams.get('rerank') || '') === 'jev';
+    if (rerank && req.socket.localAddress !== '127.0.0.1') return json(res, { error: 'rerank=jev is only served on 127.0.0.1' }, 403);
     const q = (u.searchParams.get('q') || '').trim();
     const k = Math.min(20, Math.max(1, +(u.searchParams.get('k') || 8)));
     if (!q) return json(res, { error: 'missing q' }, 400);
@@ -125,7 +138,7 @@ async function handle(req, res) {
     let hits;try{hits=await retrieve(q,k,includeSelf);}catch(e){return json(res,{error:String(e)},503);}
     // ?rerank=jev → Jev scores every passage and reorders (fail-open). Owner decision 2026-09-22.
     let jev;
-    if ((u.searchParams.get('rerank') || '') === 'jev') { try { ({ hits, jev } = await jevRerank(q, hits)); } catch (e) { jev = { error: String(e) }; } }
+    if (rerank) { try { ({ hits, jev } = await jevRerank(q, hits)); } catch (e) { jev = { error: String(e) }; } }
     return json(res, { q, ms: Date.now() - t0, selfReadGuard: !includeSelf, ...(jev ? { jev } : {}), hits });
   }
 
@@ -145,7 +158,9 @@ async function handle(req, res) {
 const servers = [];
 let stopping = false;
 function listenOn(host) {
-  const server = http.createServer(handle);
+  // Any throw in handle (e.g. new URL on a request for '//') must answer, not become an
+  // unhandled rejection that exits the process — any web page could send that request.
+  const server = http.createServer((req, res) => handle(req, res).catch(e => { console.error('handler error', req.method, req.url, e); if (!res.headersSent) json(res, { error: 'server error' }, 500); else res.destroy(); }));
   // Tailscale may not be up yet at boot; keep retrying without taking down localhost.
   server.once('error', e => { console.log(`listen ${host}:${PORT} failed (${e.code}); retrying in 60s`); if (!stopping) setTimeout(() => listenOn(host), 60000).unref(); });
   server.listen(PORT, host, () => { servers.push(server); console.log(`🧠 Neurolink brain server  →  http://${host}:${PORT}`); });
