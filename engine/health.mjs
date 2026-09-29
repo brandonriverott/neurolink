@@ -279,5 +279,7 @@ export async function runHealth({
   return status;
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// Compare real paths: started through a symlinked folder, argv[1] is the link path but import.meta.url is the real one.
+const realPath = p => { try { return fs.realpathSync(p); } catch { return p; } };
+const isMain = process.argv[1] && realPath(path.resolve(process.argv[1])) === realPath(fileURLToPath(import.meta.url));
 if (isMain) await runHealth();

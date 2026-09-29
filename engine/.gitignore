@@ -23,6 +23,7 @@
 !/gen-vault-data.js
 !/refresh.mjs
 !/health.mjs
+!/test-health.mjs
 
 !/neurons/
 /neurons/*
