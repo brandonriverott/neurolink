@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'health-')));
 const real = path.join(tmp, 'engine');
@@ -20,9 +21,15 @@ const env = {
   NEUROLINK_LOG: path.join(tmp, 'neuron-log.jsonl'), NEUROLINK_SELFTEST_LOG: path.join(tmp, 'selftest-log.jsonl'),
   NEUROLINK_REFRESH_LOG: path.join(tmp, 'refresh.log'),
 };
-const run = script => execFileSync(process.execPath, [script], { env, encoding: 'utf8' });
+const run = (...args) => execFileSync(process.execPath, args, { env, encoding: 'utf8' });
 
-assert.match(run(path.join(real, 'health.mjs')), /brain health/, 'direct run prints the report');
-assert.match(run(path.join(tmp, 'link', 'health.mjs')), /brain health/, 'run through a symlink prints the report');
-fs.rmSync(tmp, { recursive: true, force: true });
-console.log('✓ health.mjs runs directly and through a symlink');
+try {
+  assert.match(run(path.join(real, 'health.mjs')), /brain health/, 'direct run prints the report');
+  assert.match(run(path.join(tmp, 'link', 'health.mjs')), /brain health/, 'run through a symlink prints the report');
+  const url = pathToFileURL(path.join(tmp, 'link', 'health.mjs')).href;
+  assert.doesNotMatch(run('--input-type=module', '-e', `await import(${JSON.stringify(url)})`), /brain health/,
+    'importing health.mjs does not run it');
+} finally {
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+console.log('✓ health.mjs runs directly and through a symlink, and not when imported');
