@@ -1,0 +1,29 @@
+{
+  "ownerName": "Alex",
+  "vault": "~/Documents/My Vault",
+  "reflectQueue": "~/.neurolink/reflect-queue",
+  "logDir": "~/Library/Logs",
+  "hermesHome": "~/.hermes",
+  "loopLedger": "",
+  "reviewRoots": [],
+  "listenHosts": [],
+  "stackDescription": "Hermes multi-agent stack (Hermes coordinates the work; builder bots write and review each other's code; a Vault Steward files durable notes)",
+  "indexExcludePaths": ["_inbox"],
+  "neuronExcludePaths": [],
+  "privateNamePattern": "",
+  "regionRules": [
+    ["personal/people/", "assoc"],
+    ["_claude/", "prefrontal"],
+    ["_brain/wiki/", "concept"],
+    ["_brain/patterns/", "predictive"],
+    ["daily/", "hippo"],
+    ["_brain/", "hippo"],
+    ["personal/", "sensory"]
+  ],
+  "defaultRegion": "concept",
+  "projectNote": "",
+  "freshnessDirs": ["daily", "_brain/patterns", "_claude"],
+  "colorFamilyRules": [
+    ["personal", 1], ["_brain", 2], ["_claude", 3], ["daily", 3], ["template", 3], ["_attachment", 3]
+  ]
+}

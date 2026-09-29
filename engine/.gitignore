@@ -1,0 +1,35 @@
+# ALLOW-LIST. Everything in this folder is private by default — your config, the search index, logs, screenshots,
+# note lists, launchd files, one-off scripts. Only the files named below can ever be committed.
+# Adding a new code file? Add a "!" line for it on purpose, after checking it holds nothing personal.
+/*
+/*/
+
+!/.gitignore
+!/README.md
+!/config.mjs
+!/neurolink.config.example.json
+!/package.json
+!/package-lock.json
+!/brain.html
+!/start.sh
+!/rag-server.mjs
+!/rag-index.mjs
+!/index-maintenance.mjs
+!/live-index.mjs
+!/retrieval-policy.mjs
+!/retrieval-search.mjs
+!/jev-rerank.mjs
+!/vault-graph.mjs
+!/gen-vault-data.js
+!/refresh.mjs
+!/health.mjs
+
+!/neurons/
+/neurons/*
+!/neurons/run-neuron.mjs
+!/neurons/trace-miner.mjs
+!/neurons/reflect-queue.mjs
+!/neurons/evidence-paths.mjs
+!/neurons/test-reflect.mjs
+!/neurons/llm-hermes.sh
+!/neurons/llm-luna.sh

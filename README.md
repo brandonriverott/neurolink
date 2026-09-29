@@ -56,6 +56,7 @@ The AI does the rest. It stops and asks you when it needs you.
 | `vault-template/` | The empty vault: folders, rules (`AGENTS.md`), `Index.md`, `Log.md` |
 | `hermes/brain-SOUL.md` | Rules for your Hermes bot |
 | `hermes/steward-SOUL.md` | Rules for the Vault Steward |
+| `engine/` | Optional: the Neurolink engine — local search server, brain map, and background "neuron" jobs. It never edits your notes; it writes only its own pattern notes and proposals. See `engine/README.md`. |
 
 ## Your vault's folders
 
@@ -73,7 +74,7 @@ The AI does the rest. It stops and asks you when it needs you.
 - **Your notes stay on your computer.** The kit sends nothing anywhere. The only exception: when a bot reads notes to do a task, those notes go to the AI model you picked.
 - **"Only the Steward writes" is a rule, not a lock.** The bots follow it because their instructions say so. It is not a security wall.
 - **You can undo anything.** The vault uses git on your computer, so every Steward change is saved and can be reversed. Do not push your vault to a public GitHub repo; it is private.
-- **No database, no search server.** The bots search your notes directly. The only thing running in the background is the Hermes service that wakes the Steward every 15 minutes.
+- **The core kit needs no database or search server.** The bots search your notes directly, and the only background job is the Hermes service that wakes the Steward every 15 minutes. The optional `engine/` adds a local search server and scheduled jobs; its index stays on your computer and is never committed.
 
 ## License
 
