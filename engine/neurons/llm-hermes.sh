@@ -27,8 +27,18 @@ model="${NEUROLINK_HERMES_MODEL-gpt-6-luna-900k}"
 args=(chat --query-file "$in" --oneshot -Q --ignore-rules -t clarify --max-turns 3 --run-budget 150 --source neurolink)
 [ -n "$provider" ] && args+=(--provider "$provider")
 [ -n "$model" ] && args+=(-m "$model")
-printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "llm-hermes: provider=${provider:-default} model=${model:-default}" >>"$log"
-"${NEUROLINK_HERMES_BIN:-$HOME/.local/bin/hermes}" "${args[@]}" >"$out" 2>>"$log" \
-  || { tail -c 2000 "$out" >>"$log"; echo "llm-hermes: hermes chat failed (see $log)" >&2; exit 1; }   # keep Hermes's own reply as the failure reason
-[ -s "$out" ] || { echo "llm-hermes: empty reply (see $log)" >&2; exit 1; }
+note() { printf '%s llm-hermes: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$log"; }
+# Every call logs a start line, then exactly one ok / FAILED / EMPTY line. A start line with none after it means the
+# caller killed the run (the neurons' 180s SIGKILL cannot be trapped here).
+note "provider=${provider:-default} model=${model:-default}"
+rc=0; start=$SECONDS
+"${NEUROLINK_HERMES_BIN:-$HOME/.local/bin/hermes}" "${args[@]}" >"$out" 2>>"$log" || rc=$?
+secs=$((SECONDS - start))
+if [ "$rc" -ne 0 ]; then
+  note "FAILED rc=$rc after ${secs}s; last 2000 bytes of Hermes's reply follow"   # keep Hermes's own reply as the failure reason
+  { tail -c 2000 "$out"; echo; } >>"$log"   # echo: a reply with no trailing newline must not glue onto the next log line
+  echo "llm-hermes: hermes chat failed rc=$rc after ${secs}s (see $log)" >&2; exit 1
+fi
+[ -s "$out" ] || { note "EMPTY reply (rc=0) after ${secs}s"; echo "llm-hermes: empty reply after ${secs}s (see $log)" >&2; exit 1; }
+note "ok ${secs}s"
 cat "$out"
