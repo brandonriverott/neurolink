@@ -74,12 +74,12 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'applica
 function serveFile(res, file) {
   try {
     const buf = fs.readFileSync(path.join(DIR, file));
-    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'text/plain', 'access-control-allow-origin': '*' });
+    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'text/plain' });
     res.end(buf);
   } catch { res.writeHead(404); res.end('not found'); }
 }
 function json(res, obj, code = 200) {
-  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+  res.writeHead(code, { 'content-type': 'application/json' });
   res.end(JSON.stringify(obj));
 }
 
@@ -88,9 +88,19 @@ function json(res, obj, code = 200) {
 const HOSTS = ['127.0.0.1', ...CONFIG.listenHosts];
 const SAME_ORIGINS = new Set(HOSTS.flatMap(h => [`http://${h}:${PORT}`]).concat(`http://localhost:${PORT}`));
 
+// A browser page from another site must not read vault text, run Claude, or trigger Jev here
+// (no CORS headers are sent, and cross-site browser requests are refused outright). The brain's
+// own pages are same-origin; hooks, a second computer and other scripts send neither header.
+// Link clicks to the brain page stay allowed: the linking page cannot read it.
+function foreign(req, page) {
+  const o = req.headers.origin, site = req.headers['sec-fetch-site'];
+  return (o && !SAME_ORIGINS.has(o)) || (site && site !== 'same-origin' && site !== 'none' && !(page && req.headers['sec-fetch-mode'] === 'navigate'));
+}
+
 async function handle(req, res) {
   const u = new URL(req.url, `http://localhost:${PORT}`);
-  if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }); return res.end(); }
+  if (foreign(req, u.pathname === '/' || u.pathname === '/brain.html')) return json(res, { error: 'forbidden origin' }, 403);
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   if (u.pathname === '/' || u.pathname === '/brain.html') return serveFile(res, 'brain.html');
   if (u.pathname === '/vault-data.js') return serveFile(res, 'vault-data.js');
@@ -120,8 +130,6 @@ async function handle(req, res) {
   }
 
   if (u.pathname === '/chat' && req.method === 'POST') {
-    // A browser page from another site must not be able to make Claude run a prompt here.
-    if (req.headers.origin && !SAME_ORIGINS.has(req.headers.origin)) return json(res, { error: 'forbidden origin' }, 403);
     let raw = ''; for await (const c of req) raw += c;
     let q = ''; try { q = (JSON.parse(raw || '{}').q || '').trim(); } catch {}
     if (!q) return json(res, { error: 'missing q' }, 400);
