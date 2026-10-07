@@ -41,11 +41,26 @@ export function validateIndex(idx, model, vault) {
   return idx;
 }
 
-function atomicIndex(out,index) {
+// Vectors were ~87% of the index (2026-10-07) and float32 values print as ~18-digit doubles; 6 decimals keeps
+// the cosine ranking and halves the file, keeping it under Node's max string length (readFile/JSON.stringify fail past it).
+// Only `vec` is rounded: mtime/statKey floats are cache keys. Re-rounding a rounded value changes nothing.
+const r6=x=>Math.round(x*1e6)/1e6;
+const roundVecs=(k,v)=>k==='vec'&&Array.isArray(v)?v.map(r6):v;
+const DISK_HEADROOM=256*1024*1024;
+export function atomicIndex(out,index) {
+  const json=JSON.stringify(index,roundVecs),bytes=json.length;
+  // The temp copy sits beside the old file until rename: refuse up front instead of dying mid-write with ENOSPC.
+  // String length estimates the bytes; the 256 MiB margin covers multi-byte UTF-8 text (~0.6 MB on 2026-10-07).
+  const st=fs.statfsSync(path.dirname(out)),free=st.bavail*st.bsize;
+  if(free<bytes+DISK_HEADROOM){
+    const mib=n=>(n/1048576).toFixed(1);
+    const e=Error(`INSUFFICIENT_DISK: index write needs ${mib(bytes+DISK_HEADROOM)} MiB (${mib(bytes)} MiB + 256 MiB headroom), ${mib(free)} MiB free`);
+    e.code='INDEX_DISK_LOW';throw e;
+  }
   const temp=out+'.'+crypto.randomUUID()+'.tmp';
   try {
     const fd=fs.openSync(temp,'wx',0o600);
-    try {fs.writeFileSync(fd,JSON.stringify(index));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+    try {fs.writeFileSync(fd,json);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
     fs.renameSync(temp,out);
   } finally {if(fs.existsSync(temp))fs.unlinkSync(temp);}
 }

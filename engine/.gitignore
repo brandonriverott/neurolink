@@ -24,6 +24,7 @@
 !/refresh.mjs
 !/health.mjs
 !/test-health.mjs
+!/test-atomic-index.mjs
 
 !/neurons/
 /neurons/*
