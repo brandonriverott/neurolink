@@ -5,6 +5,7 @@
   "logDir": "~/Library/Logs",
   "hermesHome": "~/.hermes",
   "loopLedger": "",
+  "loopLedgerMaxAgeDays": 21,
   "reviewRoots": [],
   "listenHosts": [],
   "stackDescription": "Hermes multi-agent stack (Hermes coordinates the work; builder bots write and review each other's code; a Vault Steward files durable notes)",

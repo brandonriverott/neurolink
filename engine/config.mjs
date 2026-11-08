@@ -28,6 +28,7 @@ export const CONFIG = Object.freeze({
   logDir: expand(file.logDir || '~/Library/Logs'),
   hermesHome: expand(env.NEUROLINK_HERMES || file.hermesHome || '~/.hermes'),
   loopLedger: expand(env.LOOP_LEDGER_FILE || file.loopLedger || ''),
+  loopLedgerMaxAgeDays: Number(file.loopLedgerMaxAgeDays) > 0 ? Number(file.loopLedgerMaxAgeDays) : 21,
   reviewRoots: (env.NEUROLINK_REVIEW_ROOTS ? env.NEUROLINK_REVIEW_ROOTS.split(':') : file.reviewRoots || []).map(expand).filter(Boolean),
   // Read as "<ownerName>'s <stackDescription>" in the trace-miner prompt.
   stackDescription: file.stackDescription || 'Hermes multi-agent stack',
