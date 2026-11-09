@@ -23,14 +23,32 @@ out="$("$here/llm-hermes.sh" -p hi 2>"$tmp/err")" || fail "success case exited n
 grep -Eq 'llm-hermes: ok [0-9]+s$' "$NEUROLINK_HERMES_LOG" || fail "success not logged as 'ok <n>s'"
 one_start_one_end success
 
+# T1 — assert the built args contain the documented --source tool tag.
+# The fake Hermes captures the exact args it was invoked with ("$@") to a file.
+export TEST_ARGS_FILE="$tmp/args"
+fake 'printf "%s " "$@" >"$TEST_ARGS_FILE"; echo >>"$TEST_ARGS_FILE"; echo "all good"'
+"$here/llm-hermes.sh" -p hi >/dev/null 2>"$tmp/err" || fail "T1: tag-probe exited non-zero"
+grep -Eq -- '(^| )--source tool( |$)' "$TEST_ARGS_FILE" || fail "T1: built args lack '--source tool'"
+
 fake 'printf "max_iterations_reached"; echo "provider blew up" >&2; exit 3'   # reply has no trailing newline on purpose
 failed_call failure
+# T3 — a failed call must not emit Hermes's reply to the caller: the caller's
+# captured stdout file ($tmp/out, from this first failed_call) stays empty.
+# A reply leaking to stdout on failure is exactly the round-4 mutant T3 closes.
+[ ! -s "$tmp/out" ] || fail "T3: caller stdout not empty on failed call (reply leaked)"
 grep -q 'rc=3' "$tmp/err" || fail "stderr lacks the exit code"
 grep -Eq 'llm-hermes: FAILED rc=3 after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "log lacks 'FAILED rc=3 after <n>s'"
 grep -q 'provider blew up' "$NEUROLINK_HERMES_LOG" || fail "log lacks Hermes's stderr"
 one_start_one_end failure
 "$here/llm-hermes.sh" -p hi >/dev/null 2>&1   # a second failure: the first reply must not run into its start line
 [ "$(grep -c '^max_iterations_reached$' "$NEUROLINK_HERMES_LOG")" = 2 ] || fail "Hermes's reply glued onto another log line"
+
+# T2 — fake exits 1 with no stdout: wrapper exits 1, logs FAILED, records rc=1.
+fake 'exit 1'
+failed_call t2
+grep -q 'rc=1' "$tmp/err" || fail "T2: stderr lacks the exit code rc=1"
+grep -Eq 'llm-hermes: FAILED rc=1 after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "T2: log lacks 'FAILED rc=1 after <n>s'"
+one_start_one_end t2
 
 fake 'exit 0'
 failed_call empty
