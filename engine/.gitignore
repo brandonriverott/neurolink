@@ -36,3 +36,12 @@
 !/neurons/llm-hermes.sh
 !/neurons/test-llm-hermes.sh
 !/neurons/llm-luna.sh
+
+# trace-miner Studio fix (2026-11-08): allow exactly the new test, its fixtures, and ONE scheduler template.
+!/neurons/test-trace-miner.mjs
+!/neurons/fixtures/
+!/ops/
+/ops/*
+!/ops/launchd/
+/ops/launchd/*
+!/ops/launchd/com.brandon.neurolink-trace-miner.plist

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.brandon.neurolink-trace-miner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/brandon/.local/node/bin/node</string>
+    <string>/Users/brandon/.neurolink/repo/engine/neurons/trace-miner.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/brandon/.neurolink/repo/engine</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/brandon/.local/node/bin:/Users/brandon/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NEUROLINK_CLAUDE_CMD</key>
+    <string>/Users/brandon/.neurolink/repo/engine/neurons/llm-hermes.sh</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/brandon/Library/Logs/neurolink-trace-miner.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/brandon/Library/Logs/neurolink-trace-miner.log</string>
+</dict>
+</plist>
