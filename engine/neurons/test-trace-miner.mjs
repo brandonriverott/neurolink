@@ -110,9 +110,11 @@ function mkCtx(cfg = {}) {
     }
     if (opts.symlinkAndBig) {
       const jf = path.join(root, 'job-a-review-20261107');
-      try { fs.symlinkSync(path.join(jf, 'REVIEW-G1.md'), path.join(jf, 'REVIEW-SYMLINK.md')); } catch {}
+      const target = path.join(jf, 'SYMLINK_TARGET.txt');
+      fs.writeFileSync(target, 'VERDICT: FAIL\nMinor M1. SYMLINK_UNIQUE_MARKER_ZZZ\n');
+      try { fs.symlinkSync(target, path.join(jf, 'REVIEW-SYMLINK.md')); } catch {}
       const big = path.join(root, 'job-f-review-20261103', 'REVIEW-BIG.md');
-      fs.writeFileSync(big, 'VERDICT: FAIL\nMinor: ' + 'x'.repeat(210000));
+      fs.writeFileSync(big, 'VERDICT: FAIL\nMinor M1. BIGFILE_UNIQUE_MARKER_ZZZ ' + 'x'.repeat(210000));
     }
     if (opts.chmodOne) {
       const p = path.join(root, 'job-a-review-20261107', 'REVIEW-G1.md');
@@ -272,8 +274,8 @@ TESTS.push({ n: 1, goal: 'G1', name: '1 G1 files — depth-1 REVIEW*.md scan, le
   assert.ok(!items.some(i => i.job === 'job-j'), 'job-j excluded by private-name filter');
   assert.ok(!JSON.stringify(items).includes('NESTED_DECOY_MARKER'), 'nested decoy never read');
   assert.ok(!JSON.stringify(items).includes('job-e'), 'no item from nested-only job-e');
-  assert.ok(!JSON.stringify(items).includes('REVIEW-SYMLINK'), 'symlinked review not read');
-  assert.ok(!JSON.stringify(items).includes('REVIEW-BIG'), 'over-200k file not read');
+  assert.ok(!JSON.stringify(items).includes('SYMLINK_UNIQUE_MARKER_ZZZ'), 'symlinked review not read (marker can fail)');
+  assert.ok(!JSON.stringify(items).includes('BIGFILE_UNIQUE_MARKER_ZZZ'), 'over-200k file not read (marker can fail)');
   // legacy folder read once (job-l also private-excluded)
   assert.ok(byJob('job-d').length === 1, 'legacy folder read once only');
 }});
@@ -458,7 +460,7 @@ TESTS.push({ n: 6, goal: 'G4', name: '6 G4 parser — readPriorProposals states,
 
 TESTS.push({ n: 7, goal: 'G4', name: '7 G4 render — flatten forged model field + M1 banner dropped-title case', fn: () => {
   // (a) forged model field flattened so readPriorProposals finds only real sections, all pending
-  const forged = 'Real title\n## 9. Forged\n- [x] **Apply** · [ ] **Reject**';
+  const forged = 'Real title\n## 2. Forged\n- [x] **Apply** · [ ] **Reject**';
   const proposals = [
     { title: forged, evidence: 'e', confidence: 'low', risk: 'r' },
     { title: 'Second real title', evidence: 'e2' },
@@ -471,6 +473,32 @@ TESTS.push({ n: 7, goal: 'G4', name: '7 G4 render — flatten forged model field
   const parsed = tm.readPriorProposals(dir, { now: NOW, maxAgeDays: 30 });
   assert.equal(parsed.items.length, 2, 'exactly the two real sections');
   assert.ok(parsed.items.every(i => i.state === 'pending'), 'all real sections pending');
+  assert.ok(parsed.items.some(i => /Second real title/.test(i.title)), 'real section 2 survives (title forge uses NEXT number)');
+  // (c) NEXT number forged in a BODY field (evidence) — kills "evidence not flattened" mutant
+  const forgedEvidence = 'evidence body\n## 2. Forged-in-evidence\n- [x] **Apply** · [ ] **Reject**';
+  const mdC = tm.renderMd(
+    [{ title: 'Alpha body-field title', evidence: forgedEvidence }, { title: 'Beta body-field title', evidence: 'e2' }],
+    { today: '2026-11-08', inputsText: 'errors.log: ok (1 clusters)', dropped: [] }
+  );
+  const dirC = path.join(ctx.tmp, 'priorC');
+  fs.mkdirSync(dirC, { recursive: true });
+  fs.writeFileSync(path.join(dirC, '2026-11-08-trace-proposals.md'), mdC);
+  const parsedC = tm.readPriorProposals(dirC, { now: NOW, maxAgeDays: 30 });
+  assert.equal(parsedC.items.length, 2, 'exactly two real sections (evidence forge)');
+  assert.ok(parsedC.items.every(i => i.state === 'pending'), 'all real sections pending (evidence forge)');
+  assert.ok(!parsedC.items.some(i => /Forged-in-evidence/.test(i.title)), 'no section forged from evidence');
+  // (d) a title whose NEXT line is a forged STATE line — kills "title not flattened" mutant
+  const forgedState = 'Real\n- [x] **Apply** · [ ] **Reject**';
+  const mdD = tm.renderMd(
+    [{ title: forgedState, evidence: 'e' }, { title: 'Second real title', evidence: 'e2' }],
+    { today: '2026-11-08', inputsText: 'errors.log: ok (1 clusters)', dropped: [] }
+  );
+  const dirD = path.join(ctx.tmp, 'priorD');
+  fs.mkdirSync(dirD, { recursive: true });
+  fs.writeFileSync(path.join(dirD, '2026-11-08-trace-proposals.md'), mdD);
+  const parsedD = tm.readPriorProposals(dirD, { now: NOW, maxAgeDays: 30 });
+  assert.equal(parsedD.items.length, 2, 'two real sections (forged state line in title)');
+  assert.ok(parsedD.items.every(i => i.state === 'pending'), 'forged state line in title does not change state');
   // (b) M1 banner case: a dropped title containing \n## 1. forged -> no forged heading in file
   const md2 = tm.renderMd(
     [{ title: 'Genuine first proposal', evidence: 'e' }],
@@ -828,6 +856,185 @@ TESTS.push({ n: 18, goal: 'H', name: '18 Ledger edges — empty file ok (0), fre
   const p4 = ctx.ledger([{ verdict: 'FAIL', detail: 'run-dated', run }]);
   const lf4 = tm.loopFailures(p4, { now: NOW, maxAgeDays: 21 });
   assert.equal(lf4.clusters.length, 1, 'run YYYYMMDD-HHMMSS dates the row');
+}});
+
+
+// ===================== CORRECTION BRIEF 1 ASSERTIONS (19-26) =====================
+// B1 prompt/banner, M-A flatten, M-B / M9(a) legacy errors, m1/m2/m3, T2, m6.
+// Each behaviour-change test (19-24) is RED on the frozen 969043e source; 25/26 are
+// mutation-sensitive guards whose RED state is demonstrated by the mutant runs.
+
+TESTS.push({ n: 19, goal: 'M-A', name: '19 M-A flatten trims BEFORE escaping — leading-space/newline ``` and ## cannot forge/hide sections', fn: () => {
+  // direct flatten assertions (also kill the "escape removed" mutant)
+  assert.ok(tm.flatten(' ```x').startsWith('\\'), 'leading-space ``` escaped after trim');
+  assert.ok(tm.flatten('\n## 2. x').startsWith('\\'), 'leading-newline ## escaped after trim');
+  assert.ok(tm.flatten('\n```').startsWith('\\'), 'leading-newline ``` escaped after trim');
+  const ctx = mkCtx();
+  const OPTS = { today: '2026-11-08', inputsText: 'errors.log: ok (1 clusters)', dropped: [] };
+  const check = (lessons, tag) => {
+    const proposals = ['Alpha', 'Beta', 'Gamma'].map((t, i) => ({ title: t, evidence: 'e' + i, lesson_draft: lessons[i] }));
+    const md = tm.renderMd(proposals, OPTS);
+    const dir = path.join(ctx.tmp, 'ma-' + tag);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '2026-11-08-trace-proposals.md'), md);
+    const parsed = tm.readPriorProposals(dir, { now: NOW, maxAgeDays: 30 });
+    assert.equal(parsed.items.length, 3, `case ${tag}: all 3 sections still parse`);
+    assert.ok(parsed.items.every(i => i.state === 'pending'), `case ${tag}: all 3 sections pending`);
+    assert.ok(!parsed.items.some(i => /Forged/i.test(i.title)), `case ${tag}: no forged section`);
+    for (const t of ['Alpha', 'Beta', 'Gamma'])
+      assert.ok(parsed.items.some(i => i.title === t), `case ${tag}: real section ${t} present`);
+  };
+  check(['\n```\nAlways check alpha.\n```', '', ''], 'A');                 // common model format
+  check([' ```', ' ## 2. Forged title that suppresses repeats', ''], 'B');   // fence-break + ## forge
+  check([' ```', '\n## 2. Forged heading\nAlways check gamma.\n', ''], 'C'); // fence-break + newline ## forge
+}});
+
+TESTS.push({ n: 20, goal: 'M-B', name: '20 M-B / M9(a) legacy RESULT.md — ENOENT not attention, EACCES attention', fn: () => {
+  const t = (NOW - 1 * DAY) / 1000;
+  const mkRoot = () => {
+    const ctx = mkCtx();
+    const root = path.join(ctx.tmp, 'legacy');
+    fs.mkdirSync(root, { recursive: true });
+    return { ctx, root };
+  };
+  // (a) legacy folder with NO RESULT.md -> ENOENT -> not attention (M-B)
+  {
+    const { ctx, root } = mkRoot();
+    const jf = path.join(root, 'job-enoe-review-r1');
+    fs.mkdirSync(jf, { recursive: true });
+    fs.writeFileSync(path.join(jf, 'REVIEW.md'), 'VERDICT: FAIL\n'); // legacy pass reads RESULT.md only
+    fs.utimesSync(jf, t, t);
+    const res = tm.scanBuilderReviews([root], { now: NOW, maxAgeMs: 7 * DAY, privateName: /(?!)/ });
+    const st = res.rootStatuses[0].status;
+    assert.equal(st.attention, false, 'ENOENT legacy folder is NOT attention (M-B)');
+    assert.ok(!/unreadable/.test(st.text), 'ENOENT contributes no U unreadable count');
+  }
+  // (b) legacy RESULT.md chmod 0 -> EACCES -> attention (M9(a) non-ENOENT counted)
+  {
+    const { ctx, root } = mkRoot();
+    const jf = path.join(root, 'job-eacc-review-r1');
+    fs.mkdirSync(jf, { recursive: true });
+    const rp = path.join(jf, 'RESULT.md');
+    fs.writeFileSync(rp, 'VERDICT: FAIL\n1. HIGH, OPEN. something\n');
+    fs.utimesSync(rp, t, t);
+    fs.chmodSync(rp, 0o000);
+    ctx.restored.push(rp);
+    const res = tm.scanBuilderReviews([root], { now: NOW, maxAgeMs: 7 * DAY, privateName: /(?!)/ });
+    const st = res.rootStatuses[0].status;
+    assert.equal(st.attention, true, 'EACCES legacy is attention (M9(a) read error counted)');
+    assert.match(st.text, /unreadable/, 'EACCES shows U unreadable');
+  }
+}});
+
+TESTS.push({ n: 21, goal: 'B1', name: '21 B1 restored prompt RULES/schema + banner human caveat (negative guard)', fn: () => {
+  const ctx = mkCtx();
+  ctx.seedErrors();
+  const r = ctx.spawn(['--dry'], DEFAULT_REPLY, {});
+  const PHRASES = ['RULES', 'never code-logic', 'is_safety_rule', 'transient infra', 'deterministic check', 'DISTINCT'];
+  const missing = PHRASES.filter(p => !r.captureText.includes(p));
+  assert.deepEqual(missing, [], `built prompt missing phrases: ${missing.join(', ')}`);
+  // banner human caveat (wrote run)
+  const ctx2 = mkCtx();
+  ctx2.seedErrors();
+  ctx2.spawn([], DEFAULT_REPLY, {});
+  const outs = ctx2.readOutputs();
+  const banner = outs.all[outs.proposalFiles[0]] || '';
+  assert.ok(banner.includes('Vet each against the CURRENT state'), 'banner: Vet each against the CURRENT state');
+  assert.ok(banner.includes('never auto-apply') && banner.includes('safety/money'), 'banner: safety/money caveat present');
+}});
+
+TESTS.push({ n: 22, goal: 'm1', name: '22 m1 --dry keeps exit 1 on model/parse failure', fn: () => {
+  const ctx = mkCtx();
+  ctx.seedErrors();
+  const r = ctx.spawn(['--dry'], DEFAULT_REPLY, { TM_RC: '3' });
+  assert.equal(r.code, 1, '--dry model failure exits 1 (design 5.1)');
+  assert.equal(ctx.readOutputs().proposalFiles.length, 0, '--dry writes no proposal file on failure');
+  assert.equal(r.receipts.length, 0, '--dry writes no receipt');
+}});
+
+TESTS.push({ n: 23, goal: 'm2', name: '23 m2 failed receipt restores inputContext key (add, not remove)', fn: () => {
+  const ctx = mkCtx();
+  ctx.seedErrors();
+  const r = ctx.spawn([], DEFAULT_REPLY, { TM_RC: '3' });
+  assert.equal(r.code, 1);
+  const last = r.receipts[r.receipts.length - 1];
+  assert.equal(last.outcome, 'failed');
+  assert.ok(last.inputs, 'failed receipt still has the new inputs key');
+  assert.ok(last.inputContext && last.inputContext.counts, 'failed receipt carries restored inputContext key (m2)');
+}});
+
+TESTS.push({ n: 24, goal: 'm3', name: '24 m3 oversized-only root counts candidateFiles before size skip -> attention', fn: () => {
+  const ctx = mkCtx();
+  const root = path.join(ctx.tmp, 'oversized');
+  const jf = path.join(root, 'job-big-review-20261101');
+  fs.mkdirSync(jf, { recursive: true });
+  const p = path.join(jf, 'REVIEW-1.md');
+  fs.writeFileSync(p, 'VERDICT: FAIL\nMinor M1. ' + 'x'.repeat(210000));
+  const t = (NOW - 1 * DAY) / 1000;
+  fs.utimesSync(p, t, t);
+  fs.utimesSync(jf, t, t);
+  const res = tm.scanBuilderReviews([root], { now: NOW, maxAgeMs: 7 * DAY, privateName: /(?!)/ });
+  const st = res.rootStatuses[0].status;
+  assert.equal(st.attention, true, 'oversized-only root behaves like unparseable root (attention, m3)');
+  assert.match(st.text, /ignored/, 'oversized file counted as ignored');
+}});
+
+TESTS.push({ n: 25, goal: 'T2', name: '25 T2 M9(b) unreadable prior FOLDER + M9(c) all-unparseable root via scanBuilderReviews itself', fn: () => {
+  const t = (NOW - 1 * DAY) / 1000;
+  // M9(b): OUT_DIR is a FILE -> ENOTDIR -> unreadable, attention (not "none yet")
+  {
+    const ctx = mkCtx();
+    fs.mkdirSync(path.dirname(ctx.outDir), { recursive: true });
+    fs.writeFileSync(ctx.outDir, 'i am a file, not a folder');
+    const pp = tm.readPriorProposals(ctx.outDir, { now: NOW, maxAgeDays: 30 });
+    assert.equal(pp.status.attention, true, 'unreadable prior-proposals FOLDER is attention (M9(b))');
+    assert.match(pp.status.text, /unreadable \(ENOTDIR\)/, 'ENOTDIR reported as unreadable');
+  }
+  // M9(c): all-unparseable root via scanBuilderReviews (not by passing allIgnored to inputStatus)
+  {
+    const ctx = mkCtx();
+    const root = path.join(ctx.tmp, 'allunparseable');
+    const jf = path.join(root, 'job-x-review-20261101');
+    fs.mkdirSync(jf, { recursive: true });
+    const p = path.join(jf, 'REVIEW-1.md');
+    fs.writeFileSync(p, 'This file has no verdict word at all.\nJust prose here.\n');
+    fs.utimesSync(p, t, t);
+    fs.utimesSync(jf, t, t);
+    const res = tm.scanBuilderReviews([root], { now: NOW, maxAgeMs: 7 * DAY, privateName: /(?!)/ });
+    const st = res.rootStatuses[0].status;
+    assert.equal(st.attention, true, 'all-unparseable root is attention via scanBuilderReviews (M9(c))');
+    assert.match(st.text, /ignored/, 'ignored counted');
+  }
+}});
+
+TESTS.push({ n: 26, goal: 'm6', name: '26 m6 drop-threshold boundary (0.6, 0.625) + per-job PASS/non-PASS verdict rank', fn: () => {
+  const H = (title) => ({ title, state: 'pending', daysAgo: 2 });
+  // exactly 0.6 (3/5) -> dropped; kills the >=0.65 and >0.6 mutants
+  let r = tm.dropRepeats([{ title: 'Alpha beta gamma delta' }], [H('Alpha beta gamma epsilon')], { now: NOW });
+  assert.equal(tm.jaccard(tm.normTitle('Alpha beta gamma delta'), tm.normTitle('Alpha beta gamma epsilon')), 0.6, 'pair is exactly 0.6');
+  assert.equal(r.kept.length, 0, 'exactly 0.6 dropped (>= 0.6 boundary)');
+  // 0.625 (5/8, between 0.571 and 0.667) -> dropped
+  r = tm.dropRepeats([{ title: 'alpha beta gamma delta epsilon zeta' }], [H('alpha beta gamma delta epsilon eta theta')], { now: NOW });
+  assert.equal(r.kept.length, 0, '0.625 dropped');
+  // per-job rank: a job mixing PASS and non-PASS keeps the non-PASS (oldest) file
+  const ctx = mkCtx();
+  const root = path.join(ctx.tmp, 'rank');
+  const jf = path.join(root, 'rankjob-review-20261101');
+  fs.mkdirSync(jf, { recursive: true });
+  const mk = (name, verdict, finding, mt) => {
+    const p = path.join(jf, name);
+    fs.writeFileSync(p, `${verdict}\n${finding}\n`);
+    fs.utimesSync(p, mt, mt);
+  };
+  const t0 = (NOW - 1 * DAY) / 1000;
+  mk('REVIEW-1.md', 'VERDICT: FAIL', 'Minor M1. a real failure finding.', t0);        // oldest, non-PASS
+  mk('REVIEW-2.md', 'VERDICT: PASS', 'Minor M1. a pass with a finding.', t0 + 1);      // middle, PASS
+  mk('REVIEW-3.md', 'VERDICT: PASS', 'Minor M1. another pass finding.', t0 + 2);       // newest, PASS
+  fs.utimesSync(jf, t0 + 2, t0 + 2);
+  const res = tm.scanBuilderReviews([root], { now: NOW, maxAgeMs: 7 * DAY, privateName: /(?!)/ });
+  const items = res.items.filter(i => i.job === 'rankjob');
+  assert.equal(items.length, 2, 'per-job cap keeps 2 files');
+  assert.ok(items.some(i => i.verdict === 'FAIL'), 'non-PASS file kept despite being oldest (verdict rank, M17)');
 }});
 
 // ===================== RUNNER =====================

@@ -12,6 +12,18 @@
 
    See engine/README.md for the input-status contract, the receipt keys,
    the caps, the scheduler template and the rollout gates.
+
+   HARD RULES (by design, do not relax):
+     • NEVER auto-applies a change. Output is a review queue for the owner.
+     • NEVER edits safety rules itself. It may PROPOSE + FLAG them (is_safety_rule),
+       but money / guardrail / deny-by-default / single-writer changes are for a
+       human to apply, per the safety-review caveat.
+     • Proposes fixes to MEMORY / PROMPTS / CONFIG, never code behavior.
+     • EXCEPTION — loop-harness and builder-review clusters ONLY: it MAY propose a
+       deterministic check (a guardrails.sh tripwire, verify.sh step, rule check, test,
+       or breaker rule) as the fix — repeated build/review failures should be promoted to
+       code, not prompts. These stay REVIEW-ONLY proposals like everything else. For
+       Hermes errors.log items the memory/prompt/config-only rule stands unchanged.
    ============================================================ */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -40,8 +52,8 @@ export const isClosedStatus = status => /^\W*closed\b/i.test(status);
 export function flatten(v, cap = 400) {
   let s = (v === null || v === undefined) ? '' : String(v);
   s = s.replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/ {2,}/g, ' ');
+  s = s.trim();                 // M-A: trim FIRST, then escape (leading # / ``` run is escaped)
   s = s.replace(/^(#+|`{3,})/, '\\$1');
-  s = s.trim();
   if (s.length > cap) s = s.slice(0, cap);
   return s;
 }
@@ -195,11 +207,11 @@ export function scanBuilderReviews(roots = [], opts = {}) {
         let st;
         try { st = fs.statSync(fp); } catch (e) { counts.unreadable++; continue; }
         if (st.mtimeMs < now - maxAgeMs) continue;       // 7-day window
+        counts.candidateFiles++;                          // m3: count BEFORE the size skip
         if (st.size > 200000) { counts.ignored++; continue; }
         let text;
         try { text = fs.readFileSync(fp, 'utf8'); }
         catch (e) { counts.unreadable++; continue; }
-        counts.candidateFiles++;
         if (PRIVATE_MATCH(privateName, name, f.name, text)) { counts.excluded++; continue; }
         const verdict = normalizeVerdict(text);
         if (!verdict) { counts.ignored++; continue; }
@@ -215,8 +227,10 @@ export function scanBuilderReviews(roots = [], opts = {}) {
       let st, lines;
       try { st = fs.statSync(fp); lines = fs.readFileSync(fp, 'utf8').split('\n'); }
       catch (e) {
-        counts.unreadable++;                              // M9(a)
-        if (e.code !== 'ENOENT') console.error(`trace-miner: cannot read ${fp}: ${e.code || e}`);
+        if (e.code !== 'ENOENT') {                        // M-B: ENOENT = no RESULT.md, skipped quietly
+          counts.unreadable++;                            // M9(a): only real read errors count
+          console.error(`trace-miner: cannot read ${fp}: ${e.code || e}`);
+        }
         continue;
       }
       if (st.mtimeMs < now - maxAgeMs) continue;
@@ -514,7 +528,7 @@ export function renderMd(proposals, opts = {}) {
   const inputsText = flatten(opts.inputsText || '', 4000);
   const dropped = opts.dropped || [];
   const fm = `---\ntype: trace-proposals\ntags: [neurolink, agents, review]\ncreated: ${today}\nsource: trace-miner\nstatus: pending-review\n---\n`;
-  let banner = `# Agent Trace Proposals — ${today}\n\n> ⚠️ REVIEW ONLY — nothing here has been applied. ${inputsText}`;
+  let banner = `# Agent Trace Proposals — ${today}\n\n> ⚠️ **REVIEW ONLY — nothing here has been applied.** The trace-miner neuron read agent failure traces (${inputsText}) and proposes the fixes below. Vet each against the CURRENT state (some may already be fixed), then apply by hand. **Items flagged 🔒 touch safety/money — never auto-apply; you approve those explicitly.**`;
   if (dropped.length) {
     const titles = dropped.slice(0, 5).map(d => flatten(d.title, 120));
     banner += ` · dropped ${dropped.length} similar proposal(s) (score >= 0.6): ${titles.join('; ')}`;
@@ -560,7 +574,40 @@ function buildPrompt(hermes, reviews, loop, prior, ownerName, stackDescription) 
   while (promptReviews.length && JSON.stringify(promptReviews, null, 1).length > 24000) promptReviews.pop();
   if (promptReviews.length < reviews.length) truncated.push('review block 24000');
   const priorBlock = `=== ALREADY PROPOSED (do not repeat; a proposal with a very similar title is discarded after your reply) ===\n${lines.join('\n')}`;
-  const text = `You are the trace-miner neuron for ${ownerName}'s ${stackDescription}. Find RECURRING, FIXABLE problems and propose concrete fixes for a HUMAN to review.\n\nReturn ONLY a JSON array. Each element has: title, affected, evidence, root_cause, proposed_fix, confidence, risk, is_safety_rule, lesson_draft. These are PROPOSALS for human review; never assume auto-apply. Max 8 proposals. If nothing recurs, return [].\n\n${priorBlock}\n\nTRACE DATA\n=== Hermes recurring failures ===\n${JSON.stringify(hermes, null, 1)}\n=== Builder cross-review findings (${reviews.length} reviews) ===\n${JSON.stringify(promptReviews, null, 1)}\n=== Loop-harness build failures ===\n${JSON.stringify(loop, null, 1)}`;
+  const text = `You are the trace-miner neuron for ${ownerName}'s ${stackDescription}. You are given RECENT agent failure traces and the builders' review findings. Find RECURRING, FIXABLE problems whose root cause is the agents' MEMORY / SYSTEM-PROMPTS / CONFIG — or, for builder reviews, the builders' instructions and checks — and propose concrete fixes for a HUMAN to review.
+
+Return ONLY a JSON array. Each element:
+{
+  "title": "short problem name",
+  "affected": "which agent(s)/file(s): e.g. ~/.hermes/config.yaml, a builder's SOUL.md, the project's CLAUDE.md",
+  "evidence": "the recurring trace + how often (cite the count)",
+  "root_cause": "why it happens — memory/prompt/config, not infra",
+  "proposed_fix": "concrete change: which file + line/section + the exact edit",
+  "confidence": "low|med|high",
+  "risk": "blast radius if applied",
+  "is_safety_rule": true|false,  // true if it touches money / guardrails / deny-by-default / single-writer — FLAG, never assume auto-apply
+  "lesson_draft": "optional string — a paste-ready LESSONS.md entry (see rules)"
+}
+
+RULES:
+- Propose memory/prompt/config fixes only — never code-logic changes (except the deterministic-check exception below).
+- These are PROPOSALS for human review. Never assume they will be auto-applied.
+- If a recurring failure is transient infra (rate-limit 429, network, broken pipe, "service overloaded", upstream 5xx), DO NOT propose a prompt change — either skip it or add it with confidence "low" and root_cause "infra/transient".
+- Some failures may ALREADY be fixed. If a trace looks like an already-resolved issue, still list it but mark confidence "low" and note "verify already-fixed" in root_cause. A builder-review finding the same job's later round marked closed is resolved for that job, but still counts toward a recurring KIND of mistake.
+- For any cluster recurring >=2x — loop-harness clusters AND the same kind of builder-review finding across 2+ reviews (count distinct reviews, not rounds re-reporting one finding) — ALSO fill "lesson_draft": ONE dated imperative LESSONS.md entry (generalizable — "always check Y", never "fix file X"), ready to paste. Still never for a one-off or for transient infra. For builder reviews, recurrence means DISTINCT "job" values: later rounds of the same job re-report and re-check that job's findings, so several rounds of one job count as ONE occurrence.
+- EXCEPTION scoped to loop-harness and builder-review clusters ONLY: you MAY propose a deterministic check (a guardrails.sh tripwire, verify.sh step, a repo rule check or test, or a breaker rule) as the fix — repeated build/review failures should be promoted to code, not prompts. These remain REVIEW-ONLY proposals like everything else. For Hermes errors.log items the existing memory/prompt/config-only rule stands unchanged.
+- Do NOT draft lessons for one-off failures or transient infra (auth outage, port collision) that is already fixed — check the count.
+- Max 8 proposals, highest recurrence first. If nothing meaningful recurs, return [].
+
+${priorBlock}
+
+TRACE DATA
+=== Hermes recurring failures (normalized, with counts) ===
+${JSON.stringify(hermes, null, 1)}
+=== Builder cross-review findings (${reviews.length} reviews; newest first; verdict + findings not marked closed) ===
+${JSON.stringify(promptReviews, null, 1)}
+=== Loop-harness build failures (coding loop; count = recurrences) ===
+${JSON.stringify(loop, null, 1)}`;
   return { text, truncated };
 }
 
@@ -585,6 +632,23 @@ const parseJSON = raw => {
   else if (oa !== -1) s = s.slice(oa, ob + 1);
   return JSON.parse(s);
 };
+
+// ---- failed-receipt input context (m2: restores the base inputContext key;
+//      design 5.3 only ADDS keys, so this is added, not removed) ----
+const boundedText = value => (typeof value === 'string' ? value : JSON.stringify(value)).slice(0, 320);
+function boundedInputContext({ hermes, reviews, loop }) {
+  const cluster = item => ({
+    count: item.count,
+    ...(item.cluster ? { cluster: boundedText(item.cluster) } : {}),
+    sample: boundedText(item.sample),
+  });
+  return {
+    counts: { hermes: hermes.length, reviews: reviews.length, loop: loop.length },
+    hermes: hermes.slice(0, 2).map(cluster),
+    reviews: reviews.slice(0, 2).map(boundedText),
+    loop: loop.slice(0, 2).map(cluster),
+  };
+}
 
 async function main() {
   const cfg = await loadConfig();
@@ -650,9 +714,12 @@ async function main() {
   const failed = (error) => {
     const detail = typeof error?.stderr === 'string' && error.stderr.trim() ? error.stderr.trim() : error?.message || String(error);
     const reason = `claude/parse failed: ${detail}`.slice(0, 320);
-    if (cfg.DRY) { console.log(`dry: would skip (${reason})`); return; }
+    if (cfg.DRY) { console.log(`dry: would skip (${reason})`); process.exit(1); } // m1: --dry keeps exit 1
     console.error('✗', reason);
-    logRun(baseReceipt({ outcome: 'failed', reason, wrote: null, count: 0 }));
+    // m2: restore the base inputContext key on the failed receipt (add, don't remove).
+    const failedReceipt = baseReceipt({ outcome: 'failed', reason, wrote: null, count: 0,
+      inputContext: boundedInputContext({ hermes: errRes.clusters, reviews: scan.items, loop: loopRes.clusters }) });
+    logRun(failedReceipt);
     if (attention) writeStatus('failed', reason);
     process.exit(1);
   };

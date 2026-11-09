@@ -16,7 +16,7 @@ status: pending-review
 - **Lesson draft (for LESSONS.md):**
 ```
 Always rename atomically.
-## 9. Forged-in-lesson
+## 2. Forged-in-lesson
 - [x] **Apply** · [ ] **Reject**
 ```
 

@@ -10,6 +10,7 @@ it maintains itself (`_brain/patterns/Taste Profile.md`, `Patterns — MOC.md`, 
 Your memory never lives here. The vault is yours; this folder holds code plus a private config file.
 
 ## What's inside
+
 | File | What it does |
 |---|---|
 | `rag-server.mjs` | Search server on `http://127.0.0.1:8920` (`/search`, `/health`, `/graph`, `/chat`), serves `brain.html` |
@@ -25,9 +26,10 @@ Your memory never lives here. The vault is yours; this folder holds code plus a 
 | `config.mjs` | Loads your private settings |
 
 ## Setup
-1. Node (tested on v22.22.3) and the one dependency: `npm install`
+
+1. Node (tested on v24) and the one dependency: `npm install`
 2. `cp neurolink.config.example.json neurolink.config.json` and fill in your values
-   (vault path, your name, folder -> brain-region rules, private names to exclude, log folder).
+   (vault path, your name, folder → brain-region rules, private names to exclude, log folder).
    `neurolink.config.json` is gitignored — keep it that way. Nothing starts without it, and a broken
    file stops the engine rather than running without your privacy filter. The example ships with **no
    review root**, so a fresh checkout sends no review text (see D1 below).
@@ -133,8 +135,11 @@ they age out of the 30-day history.
 
 The review text is sent through the existing wrapper (`llm-hermes.sh` -> `hermes chat`, provider
 `openai-codex`, model `gpt-6-luna-900k` by default) — an outside model. Per review item the miner sends
-the job-folder name, the normalized verdict, and up to 12 findings of at most 300 characters each,
-inside a review block capped at 24,000 characters (plus the prior-proposals block of at most 60 lines).
+the job name (derived from the folder name) and up to 12 findings of at most 300 characters each. For
+new `REVIEW*.md` items it sends the normalized verdict plus `generation` and `source: review-file`; for
+legacy `*-review-rN` items it sends the raw verdict line (at most 160 characters) plus `round` and
+`source: review-round`. The review block is capped at 24,000 characters (plus the prior-proposals block
+of at most 60 lines).
 Review text is not screened beyond the private-name filter, which SKIPS THE WHOLE FILE on a match
 (it does not redact). Titles are capped at 120 characters. Sending review text is the **proposed
 option, not active until Brandon records D1**; the example config ships no review root so a fresh
