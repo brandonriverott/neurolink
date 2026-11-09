@@ -24,7 +24,10 @@ model="${NEUROLINK_HERMES_MODEL-gpt-6-luna-900k}"
 # run-budget 150: a wall-clock budget for the conversation run only (hermes chat --help), set below the neurons'
 # 180s SIGKILL (run-neuron.mjs / trace-miner.mjs callClaude) to make a mid-run kill less likely. Not a hard cap on
 # total wrapper time — Hermes startup/cleanup sit outside it — so the 180s kill can still happen on a slow machine.
-args=(chat --query-file "$in" --oneshot -Q --ignore-rules -t clarify --max-turns 3 --run-budget 150 --source neurolink)
+# --source tool: Hermes v0.23.0 rejects the custom source tag `neurolink` with
+# invalid_params before the model call; `tool` is the documented tag for
+# third-party integrations (kept out of user session lists).
+args=(chat --query-file "$in" --oneshot -Q --ignore-rules -t clarify --max-turns 3 --run-budget 150 --source tool)
 [ -n "$provider" ] && args+=(--provider "$provider")
 [ -n "$model" ] && args+=(-m "$model")
 note() { printf '%s llm-hermes: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$log"; }
