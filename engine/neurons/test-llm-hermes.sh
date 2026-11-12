@@ -23,12 +23,30 @@ out="$("$here/llm-hermes.sh" -p hi 2>"$tmp/err")" || fail "success case exited n
 grep -Eq 'llm-hermes: ok [0-9]+s$' "$NEUROLINK_HERMES_LOG" || fail "success not logged as 'ok <n>s'"
 one_start_one_end success
 
-# T1 — assert the built args contain the documented --source tool tag.
-# The fake Hermes captures the exact args it was invoked with ("$@") to a file.
+# T1 — assert the built args contain the documented --source tool tag and isolated zero-tool flags.
+# The fake Hermes captures the exact args it was invoked with ("$@") to a file and enforces
+# gateway_chat.py's --safe-mode contract (--run-budget is unsupported; -m is required).
 export TEST_ARGS_FILE="$tmp/args"
-fake 'printf "%s " "$@" >"$TEST_ARGS_FILE"; echo >>"$TEST_ARGS_FILE"; echo "all good"'
+fake 'printf "%s " "$@" >"$TEST_ARGS_FILE"; echo >>"$TEST_ARGS_FILE"
+case " $* " in *" --safe-mode "*)
+  case " $* " in *" --run-budget "*) echo "Error: Unsupported gateway CLI options: --run-budget" >&2; exit 2;; esac
+  case " $* " in *" -m "*|*" --model "*) ;; *) echo "Error: --safe-mode requires -m" >&2; exit 2;; esac
+;; esac
+echo "all good"'
 "$here/llm-hermes.sh" -p hi >/dev/null 2>"$tmp/err" || fail "T1: tag-probe exited non-zero"
 grep -Eq -- '(^| )--source tool( |$)' "$TEST_ARGS_FILE" || fail "T1: built args lack '--source tool'"
+grep -Eq -- '(^| )--safe-mode( |$)' "$TEST_ARGS_FILE" || fail "T4: built args lack '--safe-mode'"
+grep -Eq -- '(^| )-t context_engine( |$)' "$TEST_ARGS_FILE" || fail "T4: built args lack '-t context_engine'"
+! grep -Eq -- '(^| )-t clarify( |$)' "$TEST_ARGS_FILE" || fail "T4: built args still pass '-t clarify'"
+! grep -Eq -- '(^| )--run-budget( |$)' "$TEST_ARGS_FILE" || fail "T4: built args pass '--run-budget' under --safe-mode"
+
+# T5 — explicit empty provider+model falls back from --safe-mode (which forbids reading config.yaml)
+# to --ignore-rules -t context_engine,no_mcp so Hermes can read its configured /model without MCP/built-in tools.
+NEUROLINK_HERMES_PROVIDER="" NEUROLINK_HERMES_MODEL="" "$here/llm-hermes.sh" -p hi >/dev/null 2>"$tmp/err" || fail "T5: empty-model fallback exited non-zero"
+! grep -Eq -- '(^| )--safe-mode( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback must not pass '--safe-mode'"
+! grep -Eq -- '(^| )(-m|--provider)( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback must omit -m/--provider"
+grep -Eq -- '(^| )--ignore-rules( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback lacks '--ignore-rules'"
+grep -Eq -- '(^| )-t context_engine,no_mcp( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback lacks '-t context_engine,no_mcp'"
 
 fake 'printf "max_iterations_reached"; echo "provider blew up" >&2; exit 3'   # reply has no trailing newline on purpose
 failed_call failure
@@ -54,5 +72,13 @@ fake 'exit 0'
 failed_call empty
 grep -Eq 'llm-hermes: EMPTY reply \(rc=0\) after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "empty reply not logged with duration"
 one_start_one_end empty
+
+# T6 — whitespace/newline-only stdout on rc=0 (GatewayChatView prints "\n" when text is empty)
+# must also be treated as EMPTY reply, exit 1, and emit nothing to caller stdout.
+fake 'printf "\n  \t\n"'
+failed_call whitespace_empty
+[ ! -s "$tmp/out" ] || fail "T6: caller stdout not empty on whitespace-only reply"
+grep -Eq 'llm-hermes: EMPTY reply \(rc=0\) after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "T6: whitespace-only reply not logged as EMPTY"
+one_start_one_end whitespace_empty
 
 echo "PASS: llm-hermes.sh logging"
