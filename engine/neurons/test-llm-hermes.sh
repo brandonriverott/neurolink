@@ -40,13 +40,33 @@ grep -Eq -- '(^| )-t context_engine( |$)' "$TEST_ARGS_FILE" || fail "T4: built a
 ! grep -Eq -- '(^| )-t clarify( |$)' "$TEST_ARGS_FILE" || fail "T4: built args still pass '-t clarify'"
 ! grep -Eq -- '(^| )--run-budget( |$)' "$TEST_ARGS_FILE" || fail "T4: built args pass '--run-budget' under --safe-mode"
 
-# T5 — explicit empty provider+model falls back from --safe-mode (which forbids reading config.yaml)
-# to --ignore-rules -t context_engine,no_mcp so Hermes can read its configured /model without MCP/built-in tools.
-NEUROLINK_HERMES_PROVIDER="" NEUROLINK_HERMES_MODEL="" "$here/llm-hermes.sh" -p hi >/dev/null 2>"$tmp/err" || fail "T5: empty-model fallback exited non-zero"
-! grep -Eq -- '(^| )--safe-mode( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback must not pass '--safe-mode'"
-! grep -Eq -- '(^| )(-m|--provider)( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback must omit -m/--provider"
-grep -Eq -- '(^| )--ignore-rules( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback lacks '--ignore-rules'"
-grep -Eq -- '(^| )-t context_engine,no_mcp( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-model fallback lacks '-t context_engine,no_mcp'"
+# T5 (Test 1) — empty model fails closed before calling Hermes: exit 2, stub never invoked,
+# one start line and one FAILED line in the log, one-line stderr reason naming model, empty stdout.
+# Provider empty with model set stays allowed under --safe-mode (omitting --provider).
+NEUROLINK_HERMES_PROVIDER="" "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err" || fail "T5: empty-provider with model set exited non-zero"
+grep -Eq -- '(^| )--safe-mode( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-provider call lacks '--safe-mode'"
+grep -Eq -- '(^| )-t context_engine( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-provider call lacks '-t context_engine'"
+! grep -Eq -- '(^| )--provider( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-provider call must omit '--provider'"
+grep -Eq -- '(^| )-m gpt-6-luna-900k( |$)' "$TEST_ARGS_FILE" || fail "T5: empty-provider call lacks '-m gpt-6-luna-900k'"
+
+rm -f "$tmp/t5-invoked"
+fake "printf invoked >'$tmp/t5-invoked'; echo should-not-run"
+for empty_case in model_only both whitespace; do
+  : >"$NEUROLINK_HERMES_LOG"
+  case "$empty_case" in
+    model_only) NEUROLINK_HERMES_MODEL="" "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"; rc=$? ;;
+    both)       NEUROLINK_HERMES_PROVIDER="" NEUROLINK_HERMES_MODEL="" "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"; rc=$? ;;
+    whitespace) NEUROLINK_HERMES_MODEL="   " "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"; rc=$? ;;
+  esac
+  [ "$rc" = 2 ] || fail "T5 ($empty_case): want exit 2, got $rc"
+  [ ! -e "$tmp/t5-invoked" ] || fail "T5 ($empty_case): stub was invoked on empty model"
+  [ ! -s "$tmp/out" ] || fail "T5 ($empty_case): caller stdout not empty"
+  one_start_one_end "t5_$empty_case"
+  grep -Eq 'llm-hermes: FAILED ' "$NEUROLINK_HERMES_LOG" || fail "T5 ($empty_case): log lacks FAILED line"
+  [ "$(wc -l <"$tmp/err" | tr -d ' ')" = 1 ] || fail "T5 ($empty_case): want one-line stderr reason"
+  [ "$(head -c 11 "$tmp/err")" = "llm-hermes:" ] || fail "T5 ($empty_case): stderr must start 'llm-hermes:'"
+  grep -qi 'model' "$tmp/err" || fail "T5 ($empty_case): stderr must say a model must be named"
+done
 
 fake 'printf "max_iterations_reached"; echo "provider blew up" >&2; exit 3'   # reply has no trailing newline on purpose
 failed_call failure
@@ -80,5 +100,112 @@ failed_call whitespace_empty
 [ ! -s "$tmp/out" ] || fail "T6: caller stdout not empty on whitespace-only reply"
 grep -Eq 'llm-hermes: EMPTY reply \(rc=0\) after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "T6: whitespace-only reply not logged as EMPTY"
 one_start_one_end whitespace_empty
+
+# T7 (Test 2) — wall-clock timeout: stub sleeps longer than a 2-second NEUROLINK_HERMES_TIMEOUT;
+# wrapper exits 1 within a few seconds, logs the timeout FAILED line with duration, prints one-line
+# timeout stderr reason, and writes nothing to stdout.
+fake '/bin/sleep 5; echo "late reply"'
+t0=$SECONDS
+NEUROLINK_HERMES_TIMEOUT=2 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
+rc=$?
+elapsed=$((SECONDS - t0))
+[ "$rc" = 1 ] || fail "T7: want exit 1 on timeout, got $rc"
+[ "$elapsed" -lt 5 ] || fail "T7: wrapper did not enforce 2s timeout (elapsed ${elapsed}s)"
+[ ! -s "$tmp/out" ] || fail "T7: caller stdout not empty on timeout"
+one_start_one_end timeout
+grep -Eq 'llm-hermes: FAILED .*timed out after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "T7: log lacks timeout FAILED line with duration"
+[ "$(wc -l <"$tmp/err" | tr -d ' ')" = 1 ] || fail "T7: want one-line stderr reason on timeout"
+[ "$(head -c 11 "$tmp/err")" = "llm-hermes:" ] || fail "T7: stderr must start 'llm-hermes:'"
+grep -Eq 'timed out after [0-9]+s' "$tmp/err" || fail "T7: stderr lacks 'timed out after <n>s'"
+
+# T8 (Test 3) — descendant cleanup on timeout AND when wrapper itself receives TERM or INT:
+# stub spawns a background child and a SIGTERM-ignoring reparented grandchild that would write
+# marker files after the 1s timeout; after wrapper returns and a short wait, no marker exists.
+marker_child="$tmp/descendant-child"
+marker_grandchild="$tmp/descendant-grandchild"
+rm -f "$marker_child" "$marker_grandchild"
+fake "( /bin/sleep 2; printf leaked >'$marker_child' ) &
+/bin/sh -c \"( trap '' TERM; /bin/sleep 2; printf leaked >'$marker_grandchild' ) &\"
+/bin/sleep 10"
+NEUROLINK_HERMES_TIMEOUT=1 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
+rc=$?
+[ "$rc" = 1 ] || fail "T8: want exit 1 on timeout with descendants, got $rc"
+[ ! -s "$tmp/out" ] || fail "T8: caller stdout not empty on descendant timeout"
+one_start_one_end descendant_timeout
+/bin/sleep 2
+[ ! -e "$marker_child" ] || fail "T8: direct child survived timeout and wrote marker file"
+[ ! -e "$marker_grandchild" ] || fail "T8: reparented grandchild survived timeout and wrote marker file"
+
+for sig in TERM INT; do
+  sig_marker="$tmp/sig-descendant-$sig"
+  sig_ready="$tmp/sig-ready-$sig"
+  sig_pidfile="$tmp/sig-hermes-pid-$sig"
+  rm -f "$sig_marker" "$sig_ready" "$sig_pidfile"
+  fake "printf '%s\n' \"\$\$\" >'$sig_pidfile'
+( trap '' TERM; /bin/sleep 2; printf leaked >'$sig_marker' ) &
+printf ready >'$sig_ready'
+/bin/sleep 10"
+  sig_t0=$SECONDS
+  {
+    set -m
+    NEUROLINK_HERMES_TIMEOUT=30 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err" &
+    wpid=$!
+    set +m
+  } 2>/dev/null
+  for _ in $(seq 1 40); do [ -e "$sig_ready" ] && break; /bin/sleep 0.05; done
+  [ -e "$sig_ready" ] || { builtin kill -KILL "$wpid" 2>/dev/null; fail "T8 ($sig): stub never became ready"; }
+  builtin kill -"$sig" "$wpid" 2>/dev/null || fail "T8 ($sig): failed to signal wrapper"
+  wait "$wpid" 2>/dev/null; wrc=$?
+  sig_elapsed=$((SECONDS - sig_t0))
+  [ "$wrc" != 0 ] || fail "T8 ($sig): wrapper exited 0 when killed with $sig"
+  [ "$sig_elapsed" -lt 5 ] || fail "T8 ($sig): wrapper did not stop promptly on $sig (${sig_elapsed}s)"
+  [ ! -s "$tmp/out" ] || fail "T8 ($sig): caller stdout not empty when killed with $sig"
+  one_start_one_end "sig_$sig"
+  grep -Eq "llm-hermes: FAILED interrupted \($sig\) after [0-9]+s" "$NEUROLINK_HERMES_LOG" || fail "T8 ($sig): log lacks interrupted FAILED line"
+  ! builtin kill -0 "$(cat "$sig_pidfile")" 2>/dev/null || fail "T8 ($sig): Hermes still running after wrapper received $sig"
+  /bin/sleep 2
+  [ ! -e "$sig_marker" ] || fail "T8 ($sig): Hermes descendant survived after wrapper received $sig"
+done
+
+# T9 (Test 4) — invalid NEUROLINK_HERMES_TIMEOUT (0, abc, empty string set explicitly, negative, float):
+# rejected before Hermes is called with exit 2, stub never invoked, stdout empty.
+rm -f "$tmp/t9-invoked"
+fake "printf invoked >'$tmp/t9-invoked'; echo should-not-run"
+for bad_timeout in "0" "00" "abc" "" "-5" "1.5"; do
+  : >"$NEUROLINK_HERMES_LOG"
+  NEUROLINK_HERMES_TIMEOUT="$bad_timeout" "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  [ "$rc" = 2 ] || fail "T9 ('$bad_timeout'): want exit 2, got $rc"
+  [ ! -e "$tmp/t9-invoked" ] || fail "T9 ('$bad_timeout'): stub was invoked on invalid timeout"
+  [ ! -s "$tmp/out" ] || fail "T9 ('$bad_timeout'): caller stdout not empty"
+  one_start_one_end "t9_$bad_timeout"
+  grep -Eq 'llm-hermes: FAILED ' "$NEUROLINK_HERMES_LOG" || fail "T9 ('$bad_timeout'): log lacks FAILED line"
+  [ "$(wc -l <"$tmp/err" | tr -d ' ')" = 1 ] || fail "T9 ('$bad_timeout'): want one-line stderr reason"
+  [ "$(head -c 11 "$tmp/err")" = "llm-hermes:" ] || fail "T9 ('$bad_timeout'): stderr must start 'llm-hermes:'"
+done
+
+# T10 (Test 5) — a normal fast call still passes with the timeout machinery active (both default
+# 150s and explicit NEUROLINK_HERMES_TIMEOUT=5), returns promptly without leaking stderr, and
+# builds isolated zero-tool args (--safe-mode, -t context_engine, --source tool; no --run-budget or -t clarify).
+rm -f "$TEST_ARGS_FILE"
+fake 'printf "%s " "$@" >"$TEST_ARGS_FILE"; echo >>"$TEST_ARGS_FILE"
+case " $* " in *" --safe-mode "*)
+  case " $* " in *" --run-budget "*) echo "Error: Unsupported gateway CLI options: --run-budget" >&2; exit 2;; esac
+  case " $* " in *" -m "*|*" --model "*) ;; *) echo "Error: --safe-mode requires -m" >&2; exit 2;; esac
+;; esac
+echo "fast ok"'
+fast_t0=$SECONDS
+fast_out="$(NEUROLINK_HERMES_TIMEOUT=5 "$here/llm-hermes.sh" -p hi 2>"$tmp/err")" || fail "T10: fast call with timeout machinery exited non-zero"
+fast_elapsed=$((SECONDS - fast_t0))
+[ "$fast_out" = "fast ok" ] || fail "T10: fast call printed '$fast_out'"
+[ "$fast_elapsed" -lt 3 ] || fail "T10: fast call waited for timeout (${fast_elapsed}s)"
+[ ! -s "$tmp/err" ] || fail "T10: fast call leaked stderr '$(cat "$tmp/err")'"
+one_start_one_end fast_with_timeout
+grep -Eq 'llm-hermes: ok [0-9]+s$' "$NEUROLINK_HERMES_LOG" || fail "T10: fast call not logged as 'ok <n>s'"
+grep -Eq -- '(^| )--safe-mode( |$)' "$TEST_ARGS_FILE" || fail "T10: built args lack '--safe-mode'"
+grep -Eq -- '(^| )-t context_engine( |$)' "$TEST_ARGS_FILE" || fail "T10: built args lack '-t context_engine'"
+grep -Eq -- '(^| )--source tool( |$)' "$TEST_ARGS_FILE" || fail "T10: built args lack '--source tool'"
+! grep -Eq -- '(^| )--run-budget( |$)' "$TEST_ARGS_FILE" || fail "T10: built args contain '--run-budget'"
+! grep -Eq -- '(^| )-t clarify( |$)' "$TEST_ARGS_FILE" || fail "T10: built args contain '-t clarify'"
 
 echo "PASS: llm-hermes.sh logging"
