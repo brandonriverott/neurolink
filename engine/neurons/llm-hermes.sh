@@ -42,10 +42,9 @@ timeout_s=$((10#$timeout_s))
 in=""
 out=""
 self_pid="$$"
+parent_pid="$PPID"
 child_pid=""
 watchdog_pid=""
-target_pgrp=""
-own_pgrp=0
 timed_out=0
 started_log=0
 ended_log=0
@@ -53,55 +52,128 @@ rc=0
 start=$SECONDS
 
 stop_watchdog() {
+  local wpids=""
   if [ -n "$watchdog_pid" ]; then
-    builtin kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wpids="$(/usr/bin/pgrep -P "$watchdog_pid" 2>/dev/null || true)"
+    builtin kill -TERM "$watchdog_pid" ${wpids:+$wpids} 2>/dev/null || true
     wait "$watchdog_pid" 2>/dev/null || true
     watchdog_pid=""
   fi
 }
 
-collect_targets() {
-  local seen=" " p q queue
-  if [ -n "$target_pgrp" ]; then
-    for p in $(/usr/bin/pgrep -g "$target_pgrp" 2>/dev/null || true); do
-      case "$p" in ""|"$self_pid"|"$watchdog_pid") continue ;; esac
-      case "$seen" in *" $p "*) ;; *) seen="$seen$p " ;; esac
+is_protected_pid() {
+  case "${1:-}" in
+    ''|*[!0123456789]*|0|1|"$self_pid"|"$parent_pid"|"$watchdog_pid") return 0 ;;
+  esac
+  return 1
+}
+
+walk_descendants() {
+  local queue="$*" p="" q="" children=""
+  new_pids=""
+  while [ -n "$queue" ]; do
+    set -- $queue
+    p="$1"
+    shift
+    queue="$*"
+    if is_protected_pid "$p"; then
+      continue
+    fi
+    case "$recorded" in
+      *" $p "*) ;;
+      *)
+        recorded="$recorded$p "
+        new_pids="${new_pids:+$new_pids }$p"
+        ;;
+    esac
+    children="$(/usr/bin/pgrep -P "$p" 2>/dev/null || true)"
+    for q in $children; do
+      if is_protected_pid "$q"; then
+        continue
+      fi
+      case "$recorded" in
+        *" $q "*) ;;
+        *)
+          recorded="$recorded$q "
+          new_pids="${new_pids:+$new_pids }$q"
+          queue="${queue:+$queue }$q"
+          ;;
+      esac
     done
-  fi
-  if [ -n "$child_pid" ]; then
-    queue="$child_pid"
-    while [ -n "$queue" ]; do
-      set -- $queue
-      p="$1"; shift; queue="$*"
-      case "$p" in ""|"$self_pid"|"$watchdog_pid") continue ;; esac
-      case "$seen" in *" $p "*) ;; *) seen="$seen$p " ;; esac
-      for q in $(/usr/bin/pgrep -P "$p" 2>/dev/null || true); do
-        case "$seen" in *" $q "*) ;; *) queue="$queue $q" ;; esac
-      done
-    done
-  fi
-  for p in $seen; do
-    builtin kill -0 "$p" 2>/dev/null && printf '%s\n' "$p" || true
   done
 }
 
-stop_hermes_tree() {
-  local pids i
-  if [ "$own_pgrp" -eq 0 ] && [ -n "$target_pgrp" ]; then
-    builtin kill -TERM -- "-$target_pgrp" 2>/dev/null || true
-  fi
-  pids="$(collect_targets)"
-  [ -n "$pids" ] && { builtin kill -TERM $pids 2>/dev/null || true; }
-  for i in 1 2 3; do
-    pids="$(collect_targets)"
-    [ -z "$pids" ] && return 0
-    /bin/sleep 0.1
+collect_alive_recorded() {
+  local p=""
+  alive=""
+  for p in $recorded; do
+    if is_protected_pid "$p"; then
+      continue
+    fi
+    if builtin kill -0 "$p" 2>/dev/null; then
+      alive="${alive:+$alive }$p"
+    fi
   done
-  if [ "$own_pgrp" -eq 0 ] && [ -n "$target_pgrp" ]; then
-    builtin kill -KILL -- "-$target_pgrp" 2>/dev/null || true
+}
+
+signal_recorded_pids() {
+  local sig="$1" p=""
+  shift
+  for p in "$@"; do
+    if is_protected_pid "$p"; then
+      continue
+    fi
+    case "$recorded" in
+      *" $p "*) builtin kill -"$sig" "$p" 2>/dev/null || true ;;
+    esac
+  done
+}
+
+# Stop only verified descendants of child_pid found by breadth-first parent-link
+# walks (/usr/bin/pgrep -P). Known limit: a process that had already detached
+# from the tree before the snapshot (double-forked and reparented to launchd)
+# cannot be found by parent links and is not stopped.
+stop_hermes_tree() {
+  if [ -z "$child_pid" ] || is_protected_pid "$child_pid"; then
+    return 0
   fi
-  pids="$(collect_targets)"
-  [ -n "$pids" ] && { builtin kill -KILL $pids 2>/dev/null || true; }
+  local recorded=" " new_pids="" alive="" prev_alive="" i=""
+
+  # 1. Snapshot before any signal: breadth-first walk from child_pid.
+  walk_descendants "$child_pid"
+
+  # 2. Send TERM to every recorded PID.
+  signal_recorded_pids TERM $recorded
+
+  # 3. Short grace period (< 1s total): re-walk from alive recorded PIDs, add
+  # any new descendants to the recorded set, and send them TERM too.
+  for i in 1 2 3 4; do
+    collect_alive_recorded
+    if [ -z "$alive" ]; then
+      return 0
+    fi
+    /bin/sleep 0.1
+    collect_alive_recorded
+    if [ -z "$alive" ]; then
+      return 0
+    fi
+    walk_descendants $alive
+    if [ -n "$new_pids" ]; then
+      signal_recorded_pids TERM $new_pids
+    fi
+  done
+
+  # 4. Send KILL to every recorded PID still alive, then one more re-walk and
+  # KILL of anything new.
+  collect_alive_recorded
+  if [ -n "$alive" ]; then
+    prev_alive="$alive"
+    signal_recorded_pids KILL $alive
+    walk_descendants $prev_alive
+    if [ -n "$new_pids" ]; then
+      signal_recorded_pids KILL $new_pids
+    fi
+  fi
   return 0
 }
 
@@ -149,47 +221,36 @@ args=(chat --query-file "$in" --oneshot -Q --safe-mode -t context_engine --max-t
 case "$provider" in *[![:space:]]*) args+=(--provider "$provider") ;; esac
 args+=(-m "$model")
 
-if /usr/bin/pgrep -a -g "$self_pid" >/dev/null 2>&1; then
-  own_pgrp=1
-fi
-
 # Every call logs a start line, then exactly one ok / FAILED / EMPTY line.
 start=$SECONDS
 note "provider=${provider:-default} model=$model"
 started_log=1
 {
-  if [ "$own_pgrp" -eq 1 ]; then
-    "${NEUROLINK_HERMES_BIN:-$HOME/.local/bin/hermes}" "${args[@]}" >"$out" 2>>"$log" </dev/null &
-    child_pid=$!
-    target_pgrp="$self_pid"
-  else
-    set -m
-    "${NEUROLINK_HERMES_BIN:-$HOME/.local/bin/hermes}" "${args[@]}" >"$out" 2>>"$log" </dev/null &
-    child_pid=$!
-    set +m
-    target_pgrp="$child_pid"
-  fi
+  "${NEUROLINK_HERMES_BIN:-$HOME/.local/bin/hermes}" "${args[@]}" >"$out" 2>>"$log" </dev/null &
+  child_pid=$!
   (
-    sleep_pid=""
-    trap '[ -n "$sleep_pid" ] && builtin kill -TERM "$sleep_pid" 2>/dev/null || true; exit 0' TERM INT HUP
+    trap 'pids="$(jobs -p)"; [ -n "$pids" ] && builtin kill -TERM $pids 2>/dev/null || true; exit 0' TERM INT HUP
     /bin/sleep "$timeout_s" >/dev/null 2>&1 </dev/null &
-    sleep_pid=$!
-    wait "$sleep_pid" 2>/dev/null || exit 0
+    wait $! 2>/dev/null || exit 0
     while builtin kill -ALRM "$self_pid" 2>/dev/null; do
       /bin/sleep 0.1 >/dev/null 2>&1 </dev/null &
-      sleep_pid=$!
-      wait "$sleep_pid" 2>/dev/null || exit 0
+      wait $! 2>/dev/null || exit 0
     done
   ) >/dev/null 2>&1 </dev/null &
   watchdog_pid=$!
   if [ "$timed_out" -eq 0 ]; then
     wait "$child_pid" || rc=$?
+    if [ "$timed_out" -eq 0 ]; then
+      child_pid=""
+    fi
   fi
   trap '' ALRM
   stop_watchdog
   if [ "$timed_out" -eq 1 ]; then
     stop_hermes_tree
-    wait "$child_pid" || true
+    if [ -n "$child_pid" ]; then
+      wait "$child_pid" || true
+    fi
   fi
   child_pid=""
 } 2>/dev/null

@@ -119,13 +119,14 @@ grep -Eq 'llm-hermes: FAILED .*timed out after [0-9]+s' "$NEUROLINK_HERMES_LOG" 
 grep -Eq 'timed out after [0-9]+s' "$tmp/err" || fail "T7: stderr lacks 'timed out after <n>s'"
 
 # T8 (Test 3) — descendant cleanup on timeout AND when wrapper itself receives TERM or INT:
-# stub spawns a background child and a SIGTERM-ignoring reparented grandchild that would write
-# marker files after the 1s timeout; after wrapper returns and a short wait, no marker exists.
+# stub spawns a background child and a SIGTERM-ignoring grandchild (whose intermediate parent
+# dies on TERM) that would write marker files after the 1s timeout; after wrapper returns and
+# a short wait, no marker exists.
 marker_child="$tmp/descendant-child"
 marker_grandchild="$tmp/descendant-grandchild"
 rm -f "$marker_child" "$marker_grandchild"
 fake "( /bin/sleep 2; printf leaked >'$marker_child' ) &
-/bin/sh -c \"( trap '' TERM; /bin/sleep 2; printf leaked >'$marker_grandchild' ) &\"
+/bin/sh -c \"( trap '' TERM; /bin/sleep 2; printf leaked >'$marker_grandchild' ) & /bin/sleep 10\" &
 /bin/sleep 10"
 NEUROLINK_HERMES_TIMEOUT=1 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
 rc=$?
@@ -184,6 +185,7 @@ for bad_timeout in "0" "00" "abc" "" "-5" "1.5"; do
   [ "$(head -c 11 "$tmp/err")" = "llm-hermes:" ] || fail "T9 ('$bad_timeout'): stderr must start 'llm-hermes:'"
 done
 
+# Regression guard, not a red-first test (Finding C, coordinator decision).
 # T10 (Test 5) — a normal fast call still passes with the timeout machinery active (both default
 # 150s and explicit NEUROLINK_HERMES_TIMEOUT=5), returns promptly without leaking stderr, and
 # builds isolated zero-tool args (--safe-mode, -t context_engine, --source tool; no --run-budget or -t clarify).
@@ -207,5 +209,152 @@ grep -Eq -- '(^| )-t context_engine( |$)' "$TEST_ARGS_FILE" || fail "T10: built 
 grep -Eq -- '(^| )--source tool( |$)' "$TEST_ARGS_FILE" || fail "T10: built args lack '--source tool'"
 ! grep -Eq -- '(^| )--run-budget( |$)' "$TEST_ARGS_FILE" || fail "T10: built args contain '--run-budget'"
 ! grep -Eq -- '(^| )-t clarify( |$)' "$TEST_ARGS_FILE" || fail "T10: built args contain '-t clarify'"
+
+# T11 (Finding A) — sibling survives: start the wrapper as a process-group leader with a 1s
+# timeout and a stub that sleeps; start an unrelated sleep in the same process group; after the
+# wrapper times out the unrelated sleep is still alive, then clean it up.
+t11_ready="$tmp/t11-ready"
+rm -f "$t11_ready" "$tmp/out" "$tmp/err"
+fake "printf ready >'$t11_ready'
+/bin/sleep 10"
+/usr/bin/python3 - "$here/llm-hermes.sh" "$t11_ready" "$tmp/out" "$tmp/err" <<'PY' || fail "T11: unrelated sibling in wrapper process group did not survive timeout"
+import os, subprocess, sys, time
+
+wrapper, ready_path, out_path, err_path = sys.argv[1:5]
+env = dict(os.environ, NEUROLINK_HERMES_TIMEOUT="1")
+sib = None
+with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+    wproc = subprocess.Popen(
+        ["/bin/bash", wrapper, "-p", "hi"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=out_f,
+        stderr=err_f,
+        preexec_fn=lambda: os.setpgid(0, 0),
+    )
+    try:
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not os.path.exists(ready_path):
+            time.sleep(0.02)
+        if not os.path.exists(ready_path):
+            raise SystemExit("stub never became ready")
+        sib = subprocess.Popen(
+            ["/bin/sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: os.setpgid(0, wproc.pid),
+        )
+        assert os.getpgid(wproc.pid) == wproc.pid
+        assert os.getpgid(sib.pid) == wproc.pid
+        rc = wproc.wait(timeout=10)
+        time.sleep(0.1)
+        sib_rc = sib.poll()
+        if rc != 1:
+            raise SystemExit(f"want wrapper rc=1, got {rc}")
+        if sib_rc is not None:
+            raise SystemExit(f"sibling sleep died with {sib_rc}")
+    finally:
+        if wproc.poll() is None:
+            wproc.kill()
+            wproc.wait()
+        if sib is not None and sib.poll() is None:
+            sib.terminate()
+            try:
+                sib.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                sib.kill()
+                sib.wait()
+PY
+[ ! -s "$tmp/out" ] || fail "T11: caller stdout not empty on timeout"
+one_start_one_end t11_sibling_survives
+grep -Eq 'llm-hermes: FAILED .*timed out after [0-9]+s' "$NEUROLINK_HERMES_LOG" || fail "T11: log lacks timeout FAILED line"
+
+# T12 (Finding B) — new-session child is stopped: stub starts a child in a new session that
+# would write a marker after 3s while the stub itself stays alive; wrapper timeout 1s; after
+# the wrapper returns and a 4s wait the marker does not exist.
+t12_marker="$tmp/t12-setsid-marker"
+t12_ready="$tmp/t12-setsid-ready"
+t12_pidfile="$tmp/t12-setsid-pid"
+rm -f "$t12_marker" "$t12_ready" "$t12_pidfile" "$tmp/out" "$tmp/err"
+fake "/usr/bin/python3 -c '
+import os, pathlib, time
+os.setsid()
+pathlib.Path(\"$t12_pidfile\").write_text(str(os.getpid()))
+pathlib.Path(\"$t12_ready\").write_text(\"ready\")
+time.sleep(3)
+pathlib.Path(\"$t12_marker\").write_text(\"leaked\")
+' >/dev/null 2>&1 </dev/null &
+for _ in \$(seq 1 100); do [ -e '$t12_ready' ] && break; /bin/sleep 0.02; done
+exec /bin/sleep 10"
+NEUROLINK_HERMES_TIMEOUT=1 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
+rc=$?
+[ "$rc" = 1 ] || fail "T12: want exit 1 on timeout, got $rc"
+[ ! -s "$tmp/out" ] || fail "T12: caller stdout not empty on timeout"
+one_start_one_end t12_setsid_child
+/bin/sleep 4
+if [ -e "$t12_pidfile" ]; then builtin kill -KILL "$(cat "$t12_pidfile")" 2>/dev/null || true; fi
+[ ! -e "$t12_marker" ] || fail "T12: new-session child survived timeout and wrote marker"
+
+# T13 — grandchild is stopped: stub starts a child that starts a grandchild that would write a
+# marker after 3s while stub and child stay alive; after 1s timeout and a 4s wait the marker
+# does not exist.
+t13_marker="$tmp/t13-grandchild-marker"
+t13_ready="$tmp/t13-grandchild-ready"
+t13_pids="$tmp/t13-pids"
+rm -f "$t13_marker" "$t13_ready" "$t13_pids" "$tmp/out" "$tmp/err"
+fake "/usr/bin/python3 -c '
+import os, pathlib, subprocess, time
+os.setsid()
+g = subprocess.Popen([
+    \"/usr/bin/python3\", \"-c\",
+    \"import pathlib, time; pathlib.Path(\\\"$t13_ready\\\").write_text(\\\"ready\\\"); time.sleep(3); pathlib.Path(\\\"$t13_marker\\\").write_text(\\\"leaked\\\")\"
+], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path(\"$t13_pids\").write_text(f\"{os.getpid()} {g.pid}\")
+time.sleep(10)
+' >/dev/null 2>&1 </dev/null &
+for _ in \$(seq 1 100); do [ -e '$t13_ready' ] && break; /bin/sleep 0.02; done
+exec /bin/sleep 10"
+NEUROLINK_HERMES_TIMEOUT=1 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
+rc=$?
+[ "$rc" = 1 ] || fail "T13: want exit 1 on timeout, got $rc"
+[ ! -s "$tmp/out" ] || fail "T13: caller stdout not empty on timeout"
+one_start_one_end t13_grandchild
+/bin/sleep 4
+if [ -e "$t13_pids" ]; then builtin kill -KILL $(cat "$t13_pids") 2>/dev/null || true; fi
+[ ! -e "$t13_marker" ] || fail "T13: grandchild survived timeout and wrote marker"
+
+# T14 — signal path: wrapper receives TERM while stub with a new-session child is running;
+# after a 4s wait the marker does not exist, and the log has the single FAILED interrupted line.
+t14_marker="$tmp/t14-sig-marker"
+t14_child_ready="$tmp/t14-child-ready"
+t14_stub_ready="$tmp/t14-stub-ready"
+t14_pidfile="$tmp/t14-sig-pid"
+rm -f "$t14_marker" "$t14_child_ready" "$t14_stub_ready" "$t14_pidfile" "$tmp/out" "$tmp/err"
+fake "/usr/bin/python3 -c '
+import os, pathlib, time
+os.setsid()
+pathlib.Path(\"$t14_pidfile\").write_text(str(os.getpid()))
+pathlib.Path(\"$t14_child_ready\").write_text(\"ready\")
+time.sleep(3)
+pathlib.Path(\"$t14_marker\").write_text(\"leaked\")
+' >/dev/null 2>&1 </dev/null &
+for _ in \$(seq 1 100); do [ -e '$t14_child_ready' ] && break; /bin/sleep 0.02; done
+printf ready >'$t14_stub_ready'
+exec /bin/sleep 10"
+NEUROLINK_HERMES_TIMEOUT=30 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err" &
+t14_wpid=$!
+for _ in $(seq 1 100); do [ -e "$t14_stub_ready" ] && break; /bin/sleep 0.02; done
+[ -e "$t14_stub_ready" ] || { builtin kill -KILL "$t14_wpid" 2>/dev/null || true; fail "T14: stub never became ready"; }
+/bin/sleep 0.05
+builtin kill -TERM "$t14_wpid" 2>/dev/null || fail "T14: failed to send TERM to wrapper"
+wait "$t14_wpid" 2>/dev/null; t14_rc=$?
+[ "$t14_rc" = 143 ] || fail "T14: want exit 143 on TERM, got $t14_rc"
+[ ! -s "$tmp/out" ] || fail "T14: caller stdout not empty when killed with TERM"
+one_start_one_end t14_signal_term
+[ "$(count 'llm-hermes: FAILED interrupted \(TERM\) after [0-9]+s$')" = 1 ] || fail "T14: want single FAILED interrupted (TERM) log line"
+/bin/sleep 4
+if [ -e "$t14_pidfile" ]; then builtin kill -KILL "$(cat "$t14_pidfile")" 2>/dev/null || true; fi
+[ ! -e "$t14_marker" ] || fail "T14: new-session child survived wrapper TERM and wrote marker"
 
 echo "PASS: llm-hermes.sh logging"
