@@ -357,4 +357,67 @@ one_start_one_end t14_signal_term
 if [ -e "$t14_pidfile" ]; then builtin kill -KILL "$(cat "$t14_pidfile")" 2>/dev/null || true; fi
 [ ! -e "$t14_marker" ] || fail "T14: new-session child survived wrapper TERM and wrote marker"
 
+# Regression guard for the documented stop contract, NOT a red-first test.
+# T15 proves the SUPPORTED stop path (SIGTERM to the wrapper) still stops the
+# descendant tree when the launcher started the wrapper with SIGINT and SIGHUP
+# set to SIG_IGN. With those two signals ignored at launch, non-interactive
+# Bash cannot install traps for them (a documented limit of Bash, not fixed
+# here), but TERM stays catchable and must still work. This guard is expected
+# to PASS on the pre-change wrapper c6b6df9a60aa434e057fedb304d5f8ded814f3ee
+# too; it deliberately does NOT assert that an ignored INT/HUP stops anything.
+# (No characterization test of the ignored-signal limit is added: such a test
+#  must not fail the suite if Bash behavior differs, so it is skipped, as the
+#  brief prefers. T15 only asserts the SUPPORTED TERM path still works.)
+t15_marker="$tmp/t15-sig-marker"
+t15_ready="$tmp/t15-child-ready"
+t15_pidfile="$tmp/t15-sig-pid"
+rm -f "$t15_marker" "$t15_ready" "$t15_pidfile" "$tmp/out" "$tmp/err"
+fake "/usr/bin/python3 -c 'import os, pathlib, sys, time; os.setsid(); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); pathlib.Path(sys.argv[2]).touch(); time.sleep(3); pathlib.Path(sys.argv[3]).touch()' '$t15_pidfile' '$t15_ready' '$t15_marker' >/dev/null 2>&1 </dev/null &
+exec /bin/sleep 10"
+/usr/bin/python3 - "$here/llm-hermes.sh" "$t15_ready" "$tmp/out" "$tmp/err" <<'PY' || fail "T15: SUPPORTED TERM stop path did not survive an ignored INT/HUP launch"
+import os, signal, subprocess, sys, time
+
+wrapper, ready_path, out_path, err_path = sys.argv[1:5]
+env = dict(os.environ, NEUROLINK_HERMES_TIMEOUT="30")
+
+def ignore_int_hup():
+    # Leave SIGINT/SIGHUP ignored for the wrapper. Non-interactive Bash then
+    # inherits SIG_IGN and cannot reinstall traps for those signals; TERM is
+    # left catchable. This is exactly the documented "best effort" launch case.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+    wproc = subprocess.Popen(
+        ["/bin/bash", wrapper, "-p", "hi"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=out_f,
+        stderr=err_f,
+        preexec_fn=ignore_int_hup,
+    )
+    try:
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not os.path.exists(ready_path):
+            time.sleep(0.02)
+        if not os.path.exists(ready_path):
+            raise SystemExit("T15: new-session child never became ready")
+        time.sleep(0.05)
+        os.kill(wproc.pid, signal.SIGTERM)
+        rc = wproc.wait(timeout=10)
+        if rc != 143:
+            raise SystemExit("T15: want wrapper exit 143 on TERM, got %s" % rc)
+    finally:
+        if wproc.poll() is None:
+            wproc.kill()
+            wproc.wait()
+PY
+[ ! -s "$tmp/out" ] || fail "T15: caller stdout not empty when killed with TERM"
+one_start_one_end t15_ignored_int_hup_term
+[ "$(count 'llm-hermes: FAILED interrupted [(]TERM[)] after [0-9]+s$')" = 1 ] || fail "T15: want single FAILED interrupted (TERM) log line"
+/bin/sleep 4
+if [ -e "$t15_pidfile" ]; then builtin kill -KILL "$(cat "$t15_pidfile")" 2>/dev/null || true; fi
+[ ! -e "$t15_marker" ] || fail "T15: new-session child survived wrapper TERM (ignored INT/HUP launch) and wrote marker"
+echo "T15: PASS (regression guard: SUPPORTED TERM stop path survives ignored SIGINT/SIGHUP launch)"
+
 echo "PASS: llm-hermes.sh logging"

@@ -200,6 +200,16 @@ on_signal() {
   exit "$code"
 }
 
+# Stop contract (timeout and signals). The SUPPORTED stop paths are a TIMEOUT
+# and a SIGTERM sent to this wrapper: both snapshot the descendant tree first
+# and then stop it. SIGINT and SIGHUP are best effort: they stop the tree only
+# when the launcher left them catchable. If the launcher started this wrapper
+# with SIGINT or SIGHUP ignored (for example nohup, or some background
+# launches), non-interactive Bash inherits the ignore and cannot install a trap
+# for that signal; on that signal the wrapper does not stop Hermes or its
+# descendants. This is a limit of Bash, not fixed here. The known limit above
+# stop_hermes_tree (a process detached before the snapshot is not found) still
+# applies and is unchanged.
 trap cleanup EXIT
 trap 'timed_out=1' ALRM
 trap 'on_signal TERM 143' TERM
