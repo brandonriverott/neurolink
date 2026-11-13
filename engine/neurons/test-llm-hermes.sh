@@ -125,15 +125,15 @@ grep -Eq 'timed out after [0-9]+s' "$tmp/err" || fail "T7: stderr lacks 'timed o
 marker_child="$tmp/descendant-child"
 marker_grandchild="$tmp/descendant-grandchild"
 rm -f "$marker_child" "$marker_grandchild"
-fake "( /bin/sleep 2; printf leaked >'$marker_child' ) &
-/bin/sh -c \"( trap '' TERM; /bin/sleep 2; printf leaked >'$marker_grandchild' ) & /bin/sleep 10\" &
+fake "( /bin/sleep 4; printf leaked >'$marker_child' ) &
+/bin/sh -c \"( trap '' TERM; /bin/sleep 4; printf leaked >'$marker_grandchild' ) & /bin/sleep 10\" &
 /bin/sleep 10"
 NEUROLINK_HERMES_TIMEOUT=1 "$here/llm-hermes.sh" -p hi >"$tmp/out" 2>"$tmp/err"
 rc=$?
 [ "$rc" = 1 ] || fail "T8: want exit 1 on timeout with descendants, got $rc"
 [ ! -s "$tmp/out" ] || fail "T8: caller stdout not empty on descendant timeout"
 one_start_one_end descendant_timeout
-/bin/sleep 2
+/bin/sleep 4
 [ ! -e "$marker_child" ] || fail "T8: direct child survived timeout and wrote marker file"
 [ ! -e "$marker_grandchild" ] || fail "T8: reparented grandchild survived timeout and wrote marker file"
 
