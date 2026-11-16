@@ -32,6 +32,8 @@
 !/neurons/trace-miner.mjs
 !/neurons/reflect-queue.mjs
 !/neurons/evidence-paths.mjs
+!/neurons/lineage.mjs
+!/neurons/test-lineage.mjs
 !/neurons/test-reflect.mjs
 !/neurons/llm-hermes.sh
 !/neurons/test-llm-hermes.sh
