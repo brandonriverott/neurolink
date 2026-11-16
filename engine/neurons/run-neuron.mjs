@@ -21,7 +21,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { drain, finish } from './reflect-queue.mjs';
-import { evidenceLink, resolveNotePath, validateMemoryConsolidation } from './evidence-paths.mjs';
+import { evidenceLink, validateMemoryConsolidation } from './evidence-paths.mjs';
+import { checkLineage, lineageSummary, patternFrontmatter, resolveEvidence } from './lineage.mjs';
 import { CONFIG, PRIVATE_NAME, projectLink } from '../config.mjs';
 
 const OWNER = CONFIG.ownerName;
@@ -228,10 +229,6 @@ function nextFreePath() {
   while (fs.existsSync(p)) { p = path.join(PATTERNS_DIR, `${TODAY}-patterns-${n}.md`); n++; }
   return p;
 }
-function linkFor(title, notes) {
-  const resolved = resolveNotePath(title, notes, VAULT);
-  return resolved.ok ? evidenceLink({ evidenceRel: resolved.rel, evidenceTitle: resolved.title }) : `**${title}**`;
-}
 
 // ---------- #1: RAG-scored context (recency + importance + relevance) ----------
 async function ragSearch(query, k = 24) {
@@ -351,27 +348,38 @@ ${context}`;
 
   const seenTitles = new Set(sig.priorTitles.map(normalizePatternTitle).filter(Boolean));
   const pats = [];
-  let duplicateCount = 0;
+  let duplicateCount = 0, unsupportedCount = 0;
   for (const pattern of proposed) {
     const normalizedTitle = normalizePatternTitle(pattern.title);
     if (normalizedTitle && seenTitles.has(normalizedTitle)) {
       duplicateCount++;
       continue;
     }
+    const ev = resolveEvidence(pattern.evidence, scored, VAULT);
+    if (ev.resolved.length < 2) {   // no pattern without two real sources
+      unsupportedCount++;
+      continue;
+    }
     if (normalizedTitle) seenTitles.add(normalizedTitle);
-    pats.push(pattern);
+    pats.push({ ...pattern, evidenceResolved: ev.resolved });
   }
   if (duplicateCount) console.log(`  rejected ${duplicateCount} duplicate pattern title(s) before write.`);
+  if (unsupportedCount) console.log(`  rejected ${unsupportedCount} pattern(s) with fewer than 2 resolvable evidence notes.`);
   if (!pats.length) {
+    if (unsupportedCount) {
+      console.log('  no pattern had 2 resolvable evidence notes — nothing written.');
+      return skipped('pattern', 'no pattern had 2 resolvable evidence notes', { duplicateCount, unsupportedCount });
+    }
     console.log('  all proposed pattern titles duplicate prior patterns — nothing written.');
     return skipped('pattern', 'all proposed pattern titles duplicate prior patterns', { duplicateCount });
   }
+  const derivedFrom = [...new Set(pats.flatMap(p => p.evidenceResolved.map(r => r.rel)))];
 
   fs.mkdirSync(PATTERNS_DIR, { recursive: true });
   const file = nextFreePath();
-  let md = `---\ntype: pattern\ntags: [pattern, neuron, predictive, emerging]\ncreated: ${TODAY}\nsource: pattern-neuron\nverdict: \n---\n\n# Pattern Neuron — ${TODAY}\n\n> 🌱 ${res.summary || ''}\n> _Review: set \`verdict: approved\` / \`verdict: rejected\` in frontmatter, or just delete this note — the neuron learns either way._\n\n## Patterns\n`;
+  let md = `${patternFrontmatter({ derivedFrom, now, llmCommand: CLAUDE_CMD })}\n\n# Pattern Neuron — ${TODAY}\n\n> 🌱 ${res.summary || ''}\n> _Review: set \`verdict: approved\` / \`verdict: rejected\` in frontmatter, or just delete this note — the neuron learns either way._\n\n## Patterns\n`;
   for (const p of pats) {
-    const ev = (p.evidence || []).map(t => linkFor(t, scored)).join(' · ');
+    const ev = p.evidenceResolved.map(r => evidenceLink({ evidenceRel: r.rel, evidenceTitle: r.title })).join(' · ');
     md += `\n### ${p.wildcard ? '🎲 ' : ''}${p.title}\n- **Insight:** ${p.insight}\n- **Evidence:** ${ev || '—'}\n- **Why it matters:** ${p.why_it_matters || '—'}\n- **Suggested action:** ${p.suggested_action || '—'}${p.wildcard ? '\n- _(wildcard — deliberately against your usual taste)_' : ''}\n`;
   }
   md += `\n## Grouping\n[[_brain/patterns/Patterns — MOC|Patterns]] · [[_brain/patterns/Taste Profile]]\n\n---\n*Neuron run ${TODAY} · ${scored.length} notes retrieved via ${mode} · ${PROJECT_LINK}*\n`;
@@ -406,12 +414,12 @@ action_proposed: >
 
   const rel = path.relative(VAULT, file);
   updateMOC(rel, res.summary, pats.map(p => p.title));
-  logRun({ neuron: 'pattern', outcome: 'wrote', outputPath: rel, wrote: rel, count: pats.length, duplicateCount, titles: pats.map(p => p.title), wildcard: pats.find(p => p.wildcard)?.title || null });
+  logRun({ neuron: 'pattern', outcome: 'wrote', outputPath: rel, wrote: rel, count: pats.length, duplicateCount, unsupportedCount, derivedFromCount: derivedFrom.length, titles: pats.map(p => p.title), wildcard: pats.find(p => p.wildcard)?.title || null });
   brainLog(`pattern neuron: ${pats.length} patterns → [[${rel.replace(/\.md$/, '')}]] (taste 👍${sig.approved.length + sig.valued.length}/👎${sig.rejected.length + sig.ignored.length})`);
   console.log(`  ✓ wrote ${pats.length} patterns → ${rel}`);
   for (const p of pats) console.log(`     ${p.wildcard ? '🎲' : '•'} ${p.title}`);
   console.log(`  ✓ grouped into Patterns — MOC · taste profile refreshed`);
-  return { outcome: 'wrote', outputPath: rel, count: pats.length, duplicateCount };
+  return { outcome: 'wrote', outputPath: rel, count: pats.length, duplicateCount, unsupportedCount, derivedFromCount: derivedFrom.length };
 }
 
 // ---------- SELF-TEST (immune system + grounded strength gauge) ----------
@@ -473,7 +481,7 @@ async function selftest(opts = {}) {
     const titles = [...t.matchAll(/^###\s+(?:🎲\s*)?(.+)$/gm)].map(m => m[1].trim());
     totalPatterns += titles.length; allTitles.push(...titles);
     if (/🎲/.test(t)) withWildcard++;
-    for (const m of t.matchAll(/\[\[([^\]|#]+)/g)) {
+    for (const m of stripFm(t).matchAll(/\[\[([^\]|#]+)/g)) {   // body only: frontmatter derived_from is lineage.mjs's job
       const raw = m[1].trim(); const tgt = raw.toLowerCase().replace(/\.md$/, '');
       // ponytail: also accept on-disk hits so valid links into _archive/_attachments (excluded from the health walk) don't false-flag
       if (!existRel.has(tgt) && !existBase.has(tgt.split('/').pop()) && !fs.existsSync(path.join(VAULT, raw.replace(/\.md$/i, '') + '.md'))) deadLinks++;
@@ -482,6 +490,9 @@ async function selftest(opts = {}) {
   ok('pattern notes present', files.length > 0, `${files.length} notes · ${totalPatterns} patterns`);
   ok('evidence links resolve', deadLinks === 0, deadLinks === 0 ? 'all resolve' : `${deadLinks} dead`);
   if (deadLinks > 0) flags.push(`${deadLinks} dead wikilink(s) in pattern notes → review (NOT auto-edited)`);
+  let lin = null; try { lin = checkLineage(VAULT); } catch {}
+  ok('generated-note lineage', !!lin && lin.broken.length === 0, lin ? lineageSummary(lin) : 'vault unreadable');
+  if (lin && lin.broken.length) flags.push(`${lin.broken.length} generated note source(s) missing or superseded → run: node neurons/lineage.mjs check (NOT auto-edited)`);
   ok('wildcard present', files.length === 0 || withWildcard > 0, `${withWildcard}/${files.length} notes`);
 
   // 6. dedup integrity

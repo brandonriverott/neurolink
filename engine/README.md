@@ -147,6 +147,23 @@ checkout sends none. The model child is limited to `-t clarify`, `--max-turns 3`
 whether that removes every tool, including MCP tools, is not verified. Which host runs the daily job is
 unconfirmed; one runner only.
 
+## Pattern notes: lineage and the two-source rule
+
+Each pattern run note (`_brain/patterns/<date>-patterns[-n].md`) now states what it rests on in its frontmatter:
+`created` and `last_confirmed` (local time), `provenance: INFERRED`, `confidence: uncertain`,
+`confidence_score: 0.4`, `volatility: normal`, `generator`, `generator_version`, `generator_llm` (model command
+base name only) and `derived_from` (every note cited by any pattern in that run, as wikilinks). `verdict: ` stays
+the last frontmatter line on purpose: both verdict readers would otherwise read the next key as the verdict.
+
+A pattern is written only if at least two of its cited notes resolve to real vault notes. Others are dropped and
+counted (`unsupportedCount` in `neuron-log.jsonl`); a run where none survive writes nothing.
+
+`node neurons/lineage.mjs check [--json]` is a read-only report of generated notes whose `derived_from` sources
+are `missing`, `superseded` (a `> SUPERSEDED` banner), `unsafe` (absolute or `..` path) or `unparsed` (a `derived_from` value it cannot read), naming the patterns that cite them. Notes without `derived_from`
+(older runs) are counted as legacy and skipped. Vault from `NEUROLINK_VAULT`, else the config. Exit codes:
+`0` nothing broken, `1` something broken, `2` vault unreadable. The daily self-test shows the count as
+`generated-note lineage`. `node neurons/test-lineage.mjs` is the test.
+
 ## Rollout gates (outside the build; owner: Brandon)
 
 Use ONE order:
