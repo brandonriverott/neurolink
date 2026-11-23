@@ -121,22 +121,27 @@ export function normalizeVerdict(text) {
 
 // ---- G1: findings (5.2 step 7) ----
 const EXCLUDE_PHRASE = /^(none( of note)?|nothing|nil|n\/a|no (blocking |major |minor |blocker |critical )?(blockers?|majors?|minors?|issues?|findings?|problems?)( (found|remaining|observed|identified|of note))?)(\s+(observed|found|identified|remaining))?\W*$/i;
-const NEW_FINDING = /^\s*(?:[-*]\s*)?(?:\[[^\]]+\]\s*)?(Blocker|Major|Minor)\b\s*(?:[A-Z]?\d+)?(?:\s*[\[(]closed[\])])?\s*[.:)\-—]\s*(.+)$/i;
+const NEW_FINDING = /^\s*(?:[-*]\s*)?(?:\[[^\]]+\]\s*)?(?:Blocker|Major|Minor)\b\s*(?:[A-Z]?\d+)?(?:\s*[\[(]closed[\])])?\s*([.:)\-—]\s*)(.+)$/i;
 const P_FINDING = /^\s*(?:[-*]\s*)?\[P([0-3])\]\s*(.+)$/i;
+const ORDERED_ITEM = /^\s*\d+[.)]\s+/;
 function extractFindings(text) {
   const seen = new Set(), out = [];
   for (const raw of String(text).split(/\r?\n/)) {
+    const rawItem = raw.replace(ORDERED_ITEM, '');
+    const ordered = rawItem !== raw;
     const line = raw.replace(/[*`]/g, '');
-    const closedMarker = /[\[(]closed[\])]/.test(raw.slice(0, 60)) || /status:\s*closed/i.test(raw);
+    const finding = rawItem.replace(/[*`]/g, '');
+    const closedMarker = /[\[(]closed[\])]/i.test(rawItem.slice(0, 60)) || /status:\s*closed/i.test(raw);
     const candidates = [];
-    const nm = line.match(NEW_FINDING);
-    if (nm && !closedMarker) {
+    const nm = finding.match(NEW_FINDING);
+    if (nm && !closedMarker && !(ordered && nm[1] === '-' && /^\w/.test(nm[2]))) {
       const t = (nm[2] || '').trim();
       if (t && !EXCLUDE_PHRASE.test(t)) candidates.push(t);
     }
-    const pm = line.match(P_FINDING);
+    const pm = finding.match(P_FINDING);
     if (pm && !closedMarker) {
-      const t = (pm[2] || '').trim();
+      const detail = pm[2].trim();
+      const t = ordered ? detail.replace(/^(?::|—|-\s)\s*/, '') : detail;
       if (t && !EXCLUDE_PHRASE.test(t)) candidates.push(`P${pm[1]}: ${t}`);
     }
     if ((LIST_FINDING.test(line) || TABLE_FINDING.test(line)) && !isClosedStatus(findingStatus(line))) {

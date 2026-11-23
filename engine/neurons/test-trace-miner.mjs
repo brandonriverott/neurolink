@@ -202,6 +202,13 @@ const FINDING_CASES = [
   ['Blocker: No rollback when the write fails', 1],
   ['**Major**: real issue', 1],
   ['Major: Closed sessions leak tokens', 1],
+  ['1. **MAJOR:** Autosave drops a pending rate update', 1],
+  ['2) **Minor M2** — Reload discards the error state', 1],
+  ['3. [P2] The saved draft is reopened with the wrong value', 1],
+  ['4. **Major:** no issues found', 0],
+  ['5. Major-version upgrade exercised in the test.', 0],
+  ['6. [P2]: no issues found', 0],
+  ['7. [P2]: The deep link opens the wrong draft', 1],
   ['[P2] closed-loop check is missing', 1],
   ['Minor: No major issues found', 0],
   ['Major: no blocking issues', 0],
@@ -211,6 +218,8 @@ const CLOSED_CASES = [
   '- [closed] Blocker: x',
   'Minor M1: [closed] x',
   'Major: x (closed)',
+  '1. **MAJOR [CLOSED]:** already fixed',
+  `    12) Major: ${'x'.repeat(43)} (closed)`,
 ];
 // 11 legacy selftest cases (findingStatus / isClosedStatus)
 const SELFTEST_CASES = [
