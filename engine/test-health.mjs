@@ -14,6 +14,7 @@ const env = {
   NEUROLINK_LOG: path.join(tmp, 'neuron-log.jsonl'), NEUROLINK_SELFTEST_LOG: path.join(tmp, 'selftest-log.jsonl'),
   NEUROLINK_REFRESH_LOG: path.join(tmp, 'refresh.log'),
 };
+delete env.NEUROLINK_INDEX_FILE;  // a caller's override would bypass the config under test
 const run = script => execFileSync(process.execPath, [script], { env, encoding: 'utf8' });
 
 try {
@@ -27,6 +28,13 @@ try {
   assert.match(run(path.join(real, 'health.mjs')), /brain health/, 'direct run prints the report');
   assert.match(run(path.join(tmp, 'link', 'health.mjs')), /brain health/, 'run through a symlink prints the report');
   assert.doesNotMatch(run(path.join(tmp, 'importer.mjs')), /brain health/, 'importing health.mjs does not run it');
+
+  // indexFile in the config moves the freshness check off <home>/rag-index.json (none exists here)
+  assert.match(run(path.join(real, 'health.mjs')), /no index file/, 'without indexFile the missing home index is reported');
+  const live = path.join(tmp, 'live-index.json');
+  fs.writeFileSync(live, '{}');
+  fs.writeFileSync(path.join(real, 'neurolink.config.json'), JSON.stringify({ vault: tmp, home: tmp, logDir: tmp, indexFile: live }));
+  assert.doesNotMatch(run(path.join(real, 'health.mjs')), /no index file/, 'indexFile is the file the freshness check reads');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }

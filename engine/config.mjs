@@ -24,6 +24,9 @@ export const CONFIG = Object.freeze({
   ownerName: file.ownerName || 'the owner',
   vault: expand(env.NEUROLINK_VAULT || file.vault || '~/Documents/Vault'),
   home: expand(env.NEUROLINK_HOME || file.home || DIR),
+  // File whose mtime the freshness checks treat as "index built". Point it at a marker the live pipeline writes only
+  // after a successful snapshot swap, so a failed swap reads stale. Empty = <home>/rag-index.json.
+  indexFile: expand(env.NEUROLINK_INDEX_FILE || file.indexFile || ''),
   reflectQueue: expand(env.NEUROLINK_REFLECT_QUEUE || file.reflectQueue || '~/.neurolink/reflect-queue'),
   logDir: expand(file.logDir || '~/Library/Logs'),
   hermesHome: expand(env.NEUROLINK_HERMES || file.hermesHome || '~/.hermes'),

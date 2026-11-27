@@ -457,7 +457,7 @@ async function selftest(opts = {}) {
 
   // 3. RAG index freshness (vs newest content note)
   let idxFresh = true, idxDetail = '';
-  try { const im = fs.statSync(path.join(HOME, 'rag-index.json')).mtimeMs; idxFresh = im >= newest; idxDetail = idxFresh ? 'up to date' : `stale by ~${Math.round((newest - im) / 36e5)}h`; }
+  try { const im = fs.statSync(CONFIG.indexFile || path.join(HOME, 'rag-index.json')).mtimeMs; idxFresh = im >= newest; idxDetail = idxFresh ? 'up to date' : `stale by ~${Math.round((newest - im) / 36e5)}h`; }
   catch { idxFresh = false; idxDetail = 'no index file'; }
   ok('RAG index fresh', idxFresh, idxDetail);
   if (!idxFresh) flags.push('RAG index stale → rebuild: node rag-index.mjs');

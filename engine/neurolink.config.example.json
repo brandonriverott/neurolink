@@ -1,6 +1,7 @@
 {
   "ownerName": "Alex",
   "vault": "~/Documents/My Vault",
+  "indexFile": "",
   "reflectQueue": "~/.neurolink/reflect-queue",
   "logDir": "~/Library/Logs",
   "hermesHome": "~/.hermes",

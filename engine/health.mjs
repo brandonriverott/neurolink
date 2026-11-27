@@ -148,7 +148,8 @@ export async function runHealth({
 
   let idxFresh = false, idxDetail = '';
   let idxMtime;
-  try { idxMtime = fs.statSync(path.join(HOME, 'rag-index.json')).mtimeMs; }
+  const INDEX = CONFIG.indexFile || path.join(HOME, 'rag-index.json');
+  try { idxMtime = fs.statSync(INDEX).mtimeMs; }
   catch { idxDetail = 'no index file'; }
   if (idxMtime !== undefined) {
     try {
